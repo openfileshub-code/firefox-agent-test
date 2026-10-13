@@ -1292,6 +1292,128 @@ class BrowserController:
         result = await self.forms.fill(page, values)
         return {"ok": True, **result}
 
+    # ------------------------------------------------------------------
+    # Раскрытие меню (ТЗ 3.3): hover/click по триггеру -> новые элементы
+    # ------------------------------------------------------------------
+    async def _find_trigger_by_text(self, page: Any, trigger_text: str) -> Any:
+        """Fuzzy-поиск элемента-триггера меню по тексту.
+
+        Порядок: точное совпадение -> подстрока -> семантический поиск по
+        инвентарю LinkCache (леммы/синонимы). Возвращает Playwright Locator
+        или None.
+        """
+        if not trigger_text:
+            return None
+        # 1) Точное совпадение текста.
+        locator = page.get_by_text(trigger_text, exact=True)
+        try:
+            if await locator.count() > 0 and await locator.first.is_visible():
+                return locator.first
+        except Exception:  # noqa: BLE001
+            pass
+        # 2) Нечёткое вхождение подстроки.
+        locator = page.get_by_text(trigger_text, exact=False)
+        try:
+            count = await locator.count()
+            for i in range(min(count, 10)):
+                cand = locator.nth(i)
+                if await cand.is_visible():
+                    return cand
+        except Exception:  # noqa: BLE001
+            pass
+        # 3) Семантика: ищем в инвентаре, затем матчим DOM по xpath-подсказке.
+        if self.link_cache is not None:
+            try:
+                await self.link_cache.ensure_fresh(page)
+                hits = self.link_cache.search(trigger_text)
+                for hit in hits[:5]:
+                    text = (hit.get("text") or "").strip()
+                    if not text:
+                        continue
+                    loc = page.get_by_text(text, exact=False)
+                    if await loc.count() > 0:
+                        return loc.first
+            except Exception:  # noqa: BLE001
+                log.debug("expand_menu: семантический поиск недоступен", exc_info=True)
+        return None
+
+    async def cmd_expand_menu(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        trigger_text = str(params.get("trigger_text") or "").strip()
+        mode = str(params.get("mode") or "hover").strip().lower()
+        if mode not in ("hover", "click"):
+            return {"ok": False, "error": "mode должен быть 'hover' или 'click'"}
+        if not trigger_text:
+            return {"ok": False, "error": "trigger_text не задан"}
+
+        wait_ms = max(500, min(int(params.get("wait_ms", 1500)), 5000))
+        zone_selector = str(params.get("zone_selector") or "")
+
+        if self.link_cache is None:
+            return {"ok": False, "error": "LinkCache/сканер не загружены"}
+
+        trigger = await self._find_trigger_by_text(page, trigger_text)
+        if trigger is None:
+            return {
+                "ok": False,
+                "error": "ElementNotFoundError",
+                "message": f"Триггер меню '{trigger_text}' не найден",
+                "hint": "browser_screenshot для диагностики; проверьте регистр/язык",
+            }
+
+        # Снимок ДО раскрытия.
+        before = await self.link_cache.scan_interactive_elements(page, zone_selector)
+        before_keys = {
+            (e.get("text"), e.get("href"), e.get("tag"), e.get("selector"))
+            for e in before["elements"]
+        }
+
+        # Действие раскрытия.
+        await trigger.scroll_into_view_if_needed(timeout=5000)
+        if mode == "click":
+            await trigger.click(timeout=5000)
+        else:
+            await trigger.hover(timeout=5000)
+            # Держим курсор над элементом: доп. микро-движение против anti-hover.
+            with contextlib.suppress(Exception):
+                box = await trigger.bounding_box()
+                if box:
+                    await page.mouse.move(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2 + 1, steps=2)
+
+        # Ожидание анимации/AJAX (0.5–2 сек по ТЗ).
+        await asyncio.sleep(wait_ms / 1000.0)
+
+        # Снимок ПОСЛЕ и дифф.
+        after = await self.link_cache.scan_interactive_elements(page, zone_selector)
+        new_elements = [
+            e for e in after["elements"]
+            if (e.get("text"), e.get("href"), e.get("tag"), e.get("selector"))
+            not in before_keys
+        ]
+
+        partial = bool(before.get("partial_scan") or after.get("partial_scan"))
+        result: dict[str, Any] = {
+            "ok": True,
+            "action": "expand_menu",
+            "trigger_text": trigger_text,
+            "mode": mode,
+            "new_elements_count": len(new_elements),
+            "new_elements": new_elements[:200],
+            "total_after": len(after["elements"]),
+            "partial_scan": partial,
+        }
+        if partial:
+            result["warning"] = (
+                "Скан выполнен частично (таймаут JS); вернуто текущее состояние DOM")
+        if not new_elements and not partial:
+            result["note"] = (
+                "Новых элементов не обнаружено: возможно, меню уже было "
+                "раскрыто, триггер не является меню или требуется другое "
+                "действие (попробуйте mode='click')")
+        return result
+
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         action = str(params.get("action") or "").strip().lower()
@@ -1300,6 +1422,31 @@ class BrowserController:
         if not action:
             return {"ok": False, "error": "Действие с видео не задано"}
 
+        # --- Маршрутизация через систему адаптеров (ТЗ раздел 2) ---
+        try:
+            from adapters.registry import get_adapter
+
+            adapter = get_adapter(
+                page, video_controller=self.video_controller)
+            result = await adapter.execute(action, value)
+            if isinstance(result, dict):
+                result.setdefault("platform", adapter.platform)
+                return result
+            return {"ok": True, "action": action, "result": result,
+                    "platform": adapter.platform}
+        except ImportError:
+            log.warning("Адаптеры недоступны; работа через VideoController напрямую")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Адаптер '%s' завершился ошибкой", action)
+            return {
+                "ok": False,
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "hint": getattr(exc, "details", {}).get(
+                    "hint", "browser_screenshot для диагностики"),
+            }
+
+        # --- Legacy-путь: прямой VideoController без адаптеров ---
         if self.video_controller:
             result = await self.video_controller.action(page, action, value)
 
