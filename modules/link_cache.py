@@ -256,9 +256,35 @@ class LinkCache:
             full_terms = normalizer.normalize(target)
 
             # Строковые быстрые пути сохраняем для точных/подстрочных совпадений.
-            if q == t:
-                return 0, 1.0
+            # Важно: подстрочные проверки выполняются ТОЛЬКО против текста
+            # элемента, чтобы URL-подстроки (например /about в href) не
+            # порождали ложных срабатываний bucket 1 для других элементов.
             text_norm = cls.normalize(text_part)
+            # Точное совпадение только если target НЕ похож на URL-путь —
+            # иначе href "/about" будет ранжироваться так же, как текст "About".
+            # Проверка выполняется над СЫРЫМ target: cls.normalize() стирает
+            # слеши и другие разделители URL, уничтожая сам признак пути.
+            raw_target = (target or "").strip().lower()
+            looks_like_url = bool(re.search(r"[\w.-]+/[\w.-]", raw_target)) or raw_target.startswith(("http", "//", "#"))
+            if looks_like_url:
+                # Для URL-подобных target точное совпадение строки пути
+                # ("/about" == "about") НЕ является сильным сигналом —
+                # иначе текстовые помойки с таким же href обгонят точное
+                # текстовое совпадение. Оцениваем леммы слов из URL.
+                url_terms = normalizer.normalize(text_part)
+                score = max(
+                    normalizer.similarity(q_terms, t_terms),
+                    normalizer.similarity(q_terms, url_terms),
+                )
+                if q in text_norm:
+                    return 1, len(q) / max(1, len(text_norm))
+                if score >= 0.99:
+                    return 2, score
+                if score >= 0.48:
+                    return 3, score
+                return 9, score
+            if q == text_norm or q == t:
+                return 0, 1.0
             if q in text_norm:
                 return 1, len(q) / max(1, len(text_norm))
 
