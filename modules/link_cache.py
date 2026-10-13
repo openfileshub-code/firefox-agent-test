@@ -143,12 +143,49 @@ class LinkCache:
 
     @classmethod
     def _rank(cls, query: str, target: str) -> tuple[int, float]:
+        """Ранжирование через семантическую нормализацию (леммы + синонимы).
+
+        Совпадение считается по пересечению множеств лемм; порядок слов
+        учитывается через bigram-бонус. При недоступности SemanticNormalizer
+        используется прежняя строковая эвристика (graceful fallback).
+        """
         q = cls.normalize(query)
         t = cls.normalize(target)
         if not q or not t:
             return 9, 0.0
-        if q == t:
-            return 0, 1.0
+
+        normalizer = None
+        try:
+            from modules.text_utils import get_normalizer
+
+            normalizer = get_normalizer()
+        except Exception:
+            logger.warning(
+                "SemanticNormalizer недоступен; поиск деградирует до строк"
+            )
+
+        if normalizer is not None:
+            q_terms = normalizer.normalize(query)
+            t_terms = normalizer.normalize(target)
+
+            # Строковые быстрые пути сохраняем для точных/подстрочных совпадений.
+            if q == t:
+                return 0, 1.0
+            if q in t:
+                return 1, len(q) / max(1, len(t))
+
+            score = normalizer.similarity(q_terms, t_terms)
+            if score >= 0.99:
+                return 2, score
+            if score >= 0.48:
+                return 3, score
+            # Fallback на raw-string similarity для опечаток.
+            raw_sim = difflib.SequenceMatcher(None, q, t).ratio()
+            if raw_sim >= 0.6:
+                return 3, raw_sim
+            return 9, max(score, raw_sim)
+
+        # --- Legacy path (без pymorphy3 / словаря синонимов) ---
         if q in t:
             return 1, len(q) / max(1, len(t))
 

@@ -1,0 +1,74 @@
+{
+  "groups": [
+    {
+      "canonical": "login",
+      "variants": ["вход", "войти", "логин", "логиниться", "авторизация", "Авторизация", "sign in", "signin", "sign-in", "login", "log in", "enter", "залогиниться"]
+    },
+    {
+      "canonical": "register",
+      "variants": ["регистрация", "зарегистрироваться", "рег", "sign up", "signup", "create account", "создать аккаунт", "регистр"]
+    },
+    {
+      "canonical": "news",
+      "variants": ["новости", "новостная лента", "feed", "updates", "обновления", "лента"]
+    },
+    {
+      "canonical": "settings",
+      "variants": ["настройки", "опции", "preferences", "gear", "шестеренка", "configuration", "конфигурация", "quality settings"]
+    },
+    {
+      "canonical": "contacts",
+      "variants": ["контакты", "связаться с нами", "contact us", "contact", "обратная связь", "связь"]
+    },
+    {
+      "canonical": "profile",
+      "variants": ["профиль", "проф", "личный кабинет", "лс", "account", "аккаунт", "моя страница", "my page"]
+    },
+    {
+      "canonical": "home",
+      "variants": ["главная", "главная страница", "home", "main", "начало", "на главную", "домой"]
+    },
+    {
+      "canonical": "search",
+      "variants": ["поиск", "найти", "search", "find", "искать"]
+    },
+    {
+      "canonical": "play",
+      "variants": ["воспроизведение", "играть", "play", "запустить", "старт"]
+    },
+    {
+      "canonical": "pause",
+      "variants": ["пауза", "приостановить", "pause", "stop playing"]
+    },
+    {
+      "canonical": "volume",
+      "variants": ["громкость", "звук", "volume", "sound", "аудио", "audio"]
+    },
+    {
+      "canonical": "fullscreen",
+      "variants": ["полный экран", "фуллскрин", "fullscreen", "full screen", "развернуть"]
+    },
+    {
+      "canonical": "theater",
+      "variants": ["театральный режим", "wide mode", "theater mode", "широкоэкранный режим", "театр"]
+    },
+    {
+      "canonical": "quality",
+      "variants": ["качество", "resolution", "разрешение", "quality"]
+    },
+    {
+      "canonical": "chat",
+      "variants": ["чат", "chat", "сообщество"]
+    }
+  ],
+  "abbreviations": {
+    "проф": "профиль",
+    "рег": "регистрация",
+    "лс": "личный кабинет",
+    "нов": "новости",
+    "настр": "настройки",
+    "польз": "пользователь",
+    "юзер": "user",
+    "контакты": "связаться с нами"
+  }
+}
