@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -87,16 +88,38 @@ class BaseVideoAdapter:
     # Хелперы поиска (семантика вместо селекторов)
     # ------------------------------------------------------------------
     async def _find_by_aria(self, labels: list[str], timeout_ms: int = 3000) -> Any:
-        """Находит первый доступный элемент по точному aria-label из списка."""
-        for label in labels:
-            try:
-                locator = self.page.locator(
-                    f'[aria-label="{label}"], [aria-label="{label}" i]'
-                ).first
-                await locator.wait_for(state="visible", timeout=timeout_ms)
-                return locator
-            except Exception:  # noqa: BLE001
-                continue
+        """Находит первый доступный элемент по aria-label из списка.
+
+        Реализация (исправление бага "неподдерживаемый селектор"):
+        * используется Playwright-овый ``get_by_label`` — он корректно
+          работает даже если браузер/движок не принимает CSS-флаг
+          регистронезависимости ``[attr="v" i]`` (на некоторых сборках
+          Firefox/Camoufox такой селектор бросает SyntaxError);
+        * сначала точное совпадение, затем регистронезависимое;
+        * общий бюджет ожидания распределяется между метками, чтобы
+          метод возвращал ``None`` примерно за ``timeout_ms``, а не
+          ``timeout_ms * len(labels)`` (важно для требования ТЗ
+          «не нашёл кнопку настроек за 3 секунды -> ошибка»).
+        """
+        labels = [l for l in labels if l]
+        if not labels:
+            return None
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_ms / 1000.0
+        per_attempt = max(0.25, (timeout_ms / 1000.0) / (2 * len(labels)))
+        for exact in (True, False):
+            for label in labels:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                try:
+                    locator = self.page.get_by_label(label, exact=exact).first
+                    await locator.wait_for(
+                        state="visible", timeout=min(per_attempt, remaining) * 1000
+                    )
+                    return locator
+                except Exception:  # noqa: BLE001
+                    continue
         return None
 
     async def _find_by_text(self, texts: list[str], selector: str = "", timeout_ms: int = 2000) -> Any:

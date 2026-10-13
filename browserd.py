@@ -1414,6 +1414,47 @@ class BrowserController:
                 "действие (попробуйте mode='click')")
         return result
 
+    async def _collect_dom_sample(self, page: Any) -> dict[str, Any]:
+        """Собирает DOM-образец для реестра адаптеров (ТЗ 1.3 п.2).
+
+        Проверяет присутствие характерных маркеров платформ через
+        document.querySelector и возвращает короткий срез HTML.
+        Ошибки страницы (закрыта/навигация) не должны ломать действие —
+        в этом случае возвращаем пустой образец (маршрутизация по URL).
+        """
+        try:
+            from adapters.registry import REGISTRY, _dom_markers_for
+
+            markers: list[str] = []
+            for cls in REGISTRY:
+                for m in _dom_markers_for(cls):
+                    if m not in markers:
+                        markers.append(m)
+            if not markers:
+                return {}
+            present = await page.evaluate(
+                """(ms) => {
+                    const out = [];
+                    for (const m of ms) {
+                        try { if (document.querySelector(m)) out.push(m); }
+                        catch (e) { /* невалидный селектор пропускаем */ }
+                    }
+                    return out;
+                }""",
+                markers,
+            )
+            html_head = ""
+            try:
+                html_head = await page.evaluate(
+                    "() => document.body ? document.body.innerHTML.slice(0, 20000) : ''"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return {"selectors_present": present, "html": html_head}
+        except Exception:  # noqa: BLE001
+            log.debug("Не удалось собрать DOM-образец для реестра", exc_info=True)
+            return {}
+
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         action = str(params.get("action") or "").strip().lower()
@@ -1426,8 +1467,16 @@ class BrowserController:
         try:
             from adapters.registry import get_adapter
 
+            # URL страницы всегда участвует в маршрутизации (ТЗ 1.3 п.1);
+            # дополнительно подставляем DOM-маркеры, если они есть на странице
+            # (ТЗ 1.3 п.2) — это спасает на embed-плеерах и редиректах.
+            dom_sample = await self._collect_dom_sample(page)
             adapter = get_adapter(
-                page, video_controller=self.video_controller)
+                page,
+                page_url=getattr(page, "url", "") or None,
+                page_dom_sample=dom_sample,
+                video_controller=self.video_controller,
+            )
             result = await adapter.execute(action, value)
             if isinstance(result, dict):
                 result.setdefault("platform", adapter.platform)
