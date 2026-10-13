@@ -1,0 +1,42 @@
+{
+  "_comment": "Селекторы видео-адаптеров. Вынесены из Python-кода (ТЗ DoD: нет хардкода CSS-классов в коде). Значения — списки псевдонимов, а не один жёсткий селектор: поиск идёт по aria-label/role/тексту в первую очередь.",
+  "youtube": {
+    "dom_marker": "#movie_player",
+    "settings_button_aria": ["Settings", "Настройки", "Playback settings", "Настройки воспроизведения"],
+    "quality_menu_text": ["Quality", "Качество"],
+    "menu_role": "menu",
+    "theater_aria": ["Theater mode", "Широкоэкранный режим", "Toggle theater mode", "Переключить широкоэкранный режим"],
+    "next_video_aria": ["Next video", "Следующее видео"],
+    "autoplay_toggle_aria": ["Autoplay", "Автовоспроизведение"],
+    "player_container": "#movie_player"
+  },
+  "twitch": {
+    "dom_marker": "[data-a-target*='player']",
+    "settings_toggle_selector": "[data-a-target='player-settings-menu-toggle']",
+    "settings_button_aria": ["Settings", "Настройки"],
+    "sources_menu_text": ["Source", "Источник"],
+    "quality_option_selector": "[data-a-target='player-settings-submenu-quality-option']",
+    "chat_toggle_aria": ["Collapse Chat", "Expand Chat", "Показать чат", "Скрыть чат"],
+    "chat_toggle_text": ["Chat", "Чат"]
+  },
+  "vk": {
+    "dom_markers": [".VideoPlayer", "#video_player", "[data-video-player]"],
+    "login_wall_selectors": ["[data-testid='login'] form", ".Login", "#login_container", "form[action*='login']"],
+    "mute_button_aria": ["Mute", "Unmute", "Выключить звук", "Включить звук", "Без звука"],
+    "fullscreen_aria": ["Fullscreen", "Полноэкранный режим", "Развернуть", "Во весь экран"],
+    "volume_slider_selector": "input[type='range'][class*='volume' i], input[type='range'][aria-label*='громкость' i], input[type='range'][aria-label*='volume' i]",
+    "settings_button_aria": ["Settings", "Настройки", "Ещё", "More"],
+    "quality_menu_text": ["Качество", "Quality"]
+  },
+  "rutube": {
+    "dom_markers": [".rybka-context-menu", "#playerUniqId", "[class*='rutube-player' i]"],
+    "settings_button_aria": ["Settings", "Настройки", "More options", "Ещё"],
+    "settings_button_selector": "[class*='settings' i][role='button'], [class*='gear' i]",
+    "quality_menu_text": ["Качество", "Quality"],
+    "fullscreen_aria": ["Fullscreen", "Полный экран", "Развернуть"]
+  },
+  "generic_html5": {
+    "video_selector": "video",
+    "iframe_hint": "Управление внутри iframe выполняется через contentDocument, если тот доступен; иначе — клик по центру оверлея."
+  }
+}

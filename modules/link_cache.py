@@ -265,21 +265,24 @@ class LinkCache:
             # Проверка выполняется над СЫРЫМ target: cls.normalize() стирает
             # слеши и другие разделители URL, уничтожая сам признак пути.
             raw_target = (target or "").strip().lower()
-            looks_like_url = bool(re.search(r"[\w.-]+/[\w.-]", raw_target)) or raw_target.startswith(("http", "//", "#"))
+            # Признак "это URL, а не текст элемента": абсолютный URL,
+            # якорь или путь с несколькими сегментами (/about/settings).
+            # Односегментные пути ("/about") нормализуются как обычное
+            # слово и ранжируются по общим правилам.
+            looks_like_url = raw_target.startswith(("http", "//", "#")) or \
+                raw_target.count("/") >= 2
             if looks_like_url:
-                # Для URL-подобных target точное совпадение строки пути
-                # ("/about" == "about") НЕ является сильным сигналом —
-                # иначе текстовые помойки с таким же href обгонят точное
-                # текстовое совпадение. Оцениваем леммы слов из URL.
-                url_terms = normalizer.normalize(text_part)
+                # Для URL-подобного target сопоставляем леммы запроса с
+                # леммами пути (слова из path/query вместо разделителей).
+                # Сигнал слабее текстового на один уровень (min bucket 1):
+                # точное текстовое совпадение (bucket 0) всегда выигрывает.
+                url_terms = normalizer.normalize(target)
                 score = max(
                     normalizer.similarity(q_terms, t_terms),
                     normalizer.similarity(q_terms, url_terms),
                 )
-                if q in text_norm:
-                    return 1, len(q) / max(1, len(text_norm))
-                if score >= 0.99:
-                    return 2, score
+                if q in text_norm or score >= 0.99:
+                    return 1, score
                 if score >= 0.48:
                     return 3, score
                 return 9, score
@@ -331,15 +334,19 @@ class LinkCache:
         for item in self.links:
             # Текст и href ранжируем раздельно: URL не должен "загрязнять"
             # леммы текста (и наоборот), но учитываем оба сигнала.
+            # При равных bucket/score текстовое совпадение приоритетнее
+            # URL-совпадения (href даёт +0.5 к сортировочному ключу bucket).
             text = str(item.get("text", "") or "")
             href = str(item.get("href", "") or "")
             bucket, score = self._rank(query, text)
-            if bucket >= 9 and href:
+            sort_bucket = float(bucket)
+            if href:
                 alt_bucket, alt_score = self._rank(query, href)
                 if alt_bucket < bucket:
                     bucket, score = alt_bucket, alt_score
+                    sort_bucket = alt_bucket + 0.5
             if bucket < 9:
-                results.append((bucket, -score, item))
+                results.append((sort_bucket, -score, item))
 
         results.sort(key=lambda row: (row[0], row[1]))
         return [
