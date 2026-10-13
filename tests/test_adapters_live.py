@@ -114,6 +114,18 @@ def _write(name: str, html: str) -> str:
     return "file://" + path
 
 
+def _fulfill(body_html: str):
+    """route.fulfill с явным UTF-8 в Content-Type.
+
+    Без charset браузер декодирует тело как windows-1252 и русские
+    aria-label становятся mojibake — поиск по метке не срабатывает.
+    """
+    def handler(route):
+        return route.fulfill(body=body_html,
+                             content_type="text/html; charset=utf-8")
+    return handler
+
+
 async def _get_page(browser):
     page = await browser.new_page()
     return page
@@ -142,9 +154,7 @@ async def run_scenarios():
     try:
         # --- 1. YouTube-стенд: качество через UI + theater mode ---
         page = await _get_page(browser)
-        await page.route("https://yt.stand.test/**",
-                        lambda route: route.fulfill(body=YT_STAND,
-                                                    content_type="text/html"))
+        await page.route("https://yt.stand.test/**", _fulfill(YT_STAND))
         await page.goto("https://yt.stand.test/watch?v=stand")
         adapter = get_adapter(page, page_url="https://www.youtube.com/watch?v=stand",
                               video_controller=None)
@@ -159,9 +169,7 @@ async def run_scenarios():
 
         # --- 2. Twitch-стенд: source + чат ---
         page = await _get_page(browser)
-        await page.route("https://tw.stand.test/**",
-                        lambda route: route.fulfill(body=TW_STAND,
-                                                    content_type="text/html"))
+        await page.route("https://tw.stand.test/**", _fulfill(TW_STAND))
         await page.goto("https://tw.stand.test/somestream")
         adapter = get_adapter(page, page_url="https://twitch.tv/somestream")
         results["tw_adapter"] = type(adapter).__name__
