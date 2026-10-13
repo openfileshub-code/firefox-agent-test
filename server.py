@@ -419,7 +419,45 @@ async def browser_tabs() -> dict:
 async def browser_video(
     action: str, value: Optional[float] = None
 ) -> dict:
+    """Управление видеоплеером через систему адаптеров платформ.
+
+    Адаптер выбирается автоматически по URL/DOM (YouTube, Twitch, VK Video,
+    Rutube или generic HTML5 fallback). Поддерживаемые действия:
+    play, pause, volume/set_volume (percent), seek (seconds), state,
+    set_quality ('480p', '1080p60', 'Auto'... — через UI-автоматизацию,
+    без устаревшего IFrame API), toggle_theater_mode, next_video,
+    toggle_chat_visibility, fullscreen_enter, detect_login.
+    Результат содержит поля 'adapter' и 'platform'.
+    """
     return await call("video_action", {"action": action, "value": value})
+
+
+@mcp.tool()
+async def browser_expand_menu(
+    trigger_text: str,
+    mode: str = "hover",
+    wait_ms: int = 1500,
+    zone_selector: str = "",
+) -> dict:
+    """Раскрыть меню/дропдаун и вернуть НОВЫЕ интерактивные элементы.
+
+    Находит триггер по тексту (fuzzy + семантический поиск лемм/синонимов),
+    выполняет hover или click, ждёт анимацию/AJAX, повторно сканирует DOM
+    (включая Shadow DOM) и возвращает только элементы, появившиеся после
+    раскрытия. При таймауте скана ставит флаг partial_scan=true.
+
+    Args:
+        trigger_text: текст пункта меню, напр. "Продукты" / "Категории".
+        mode: "hover" или "click".
+        wait_ms: ожидание анимации (500-5000 мс, по умолчанию 1500).
+        zone_selector: необязательный CSS-селектор зоны сканирования.
+    """
+    return await call("expand_menu", {
+        "trigger_text": trigger_text,
+        "mode": mode,
+        "wait_ms": wait_ms,
+        "zone_selector": zone_selector,
+    })
 
 
 @mcp.tool()
