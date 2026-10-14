@@ -165,7 +165,114 @@ class BaseVideoAdapter:
         return await self._html5("seek_to", seconds)
 
     async def state(self) -> dict[str, Any]:
-        return await self._html5("state")
+        """Базовое состояние + платформенные поля (режимы плеера).
+
+        Системная правка №2: в state добавлены theater_mode/fullscreen —
+        адаптеры дополняют их своими признаками.
+        """
+        result = await self._html5("state")
+        if isinstance(result, dict):
+            modes = await self.get_player_modes()
+            state = result.setdefault("state", {})
+            if isinstance(state, dict):
+                state.update(modes)
+            else:
+                result.update(modes)
+        return result
+
+    async def get_player_modes(self) -> dict[str, Any]:
+        """Платформенные режимы отображения. По умолчанию — только fullscreen."""
+        return {
+            "theater_mode": None,  # None = не определяется на этой платформе
+            "fullscreen": await self._is_fullscreen(),
+        }
+
+    async def _is_fullscreen(self) -> bool:
+        try:
+            return bool(await self.page.evaluate(
+                "() => !!document.fullscreenElement || !!document.webkitFullscreenElement"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def set_volume(self, percent: float) -> dict[str, Any]:
+        """Установка громкости с верификацией (системная правка №7).
+
+        Базовая реализация: HTML5 + отложенная повторная проверка —
+        если плеер/расширение переписали volume обратно, значение
+        переустанавливается. Платформенные адаптеры могут добавить
+        свои каналы (клавиши, UI-слайдер).
+        """
+        first = await self._html5("volume_set", percent)
+        if not isinstance(first, dict):
+            return first
+        if not first.get("ok"):
+            return first
+
+        target = self._normalize_volume_arg(percent)
+        verified = await self._verify_volume(target, attempts=3, delay=0.25)
+        first.setdefault("state", {})
+        if isinstance(first["state"], dict):
+            first["state"]["volume"] = verified.get("volume")
+            first["state"]["muted"] = verified.get("muted")
+        first["verified"] = verified.get("applied", False)
+        first["retries"] = verified.get("attempts", 0)
+        if not verified.get("applied"):
+            first["warning"] = (
+                "Громкость была изменена внешним скриптом плеера; "
+                "повторные попытки не закрепили значение"
+            )
+        return first
+
+    @staticmethod
+    def _normalize_volume_arg(percent: Any) -> float:
+        """Приводит аргумент к 0..1 (принимает проценты и доли)."""
+        raw = str(percent).strip().rstrip("%")
+        number = float(raw)
+        if number > 1.0:
+            number /= 100.0
+        return max(0.0, min(1.0, number))
+
+    async def _read_video_volume(self) -> tuple[float | None, bool | None]:
+        try:
+            data = await self.page.evaluate(
+                "() => { const v = document.querySelector('video');"
+                "if (!v) return null;"
+                "return { volume: Number.isFinite(v.volume) ? v.volume : null,"
+                "         muted: !!v.muted }; }"
+            )
+        except Exception:  # noqa: BLE001
+            return None, None
+        if not data:
+            return None, None
+        return data.get("volume"), data.get("muted")
+
+    async def _verify_volume(
+        self,
+        target: float,
+        attempts: int = 3,
+        delay: float = 0.25,
+    ) -> dict[str, Any]:
+        """Проверяет, что громкость удержалась; при сбросе — переустанавливает."""
+        reapplied = 0
+        for i in range(attempts):
+            if i:
+                await asyncio.sleep(delay)
+            volume, muted = await self._read_video_volume()
+            if volume is not None and abs(volume - target) <= 0.02 and not muted:
+                return {"applied": True, "volume": volume,
+                        "muted": muted, "attempts": reapplied}
+            # Значение сброшено/переписано — повторяем установку напрямую.
+            reapply = await self._html5("volume_set", target)
+            if isinstance(reapply, dict) and reapply.get("ok"):
+                reapplied += 1
+        volume, muted = await self._read_video_volume()
+        applied = (
+            volume is not None
+            and abs(volume - target) <= 0.02
+            and not muted
+        )
+        return {"applied": applied, "volume": volume,
+                "muted": muted, "attempts": reapplied}
 
     async def _html5(self, action: str, value: Any = None) -> dict[str, Any]:
         """Делегирование базовому VideoController (graceful fallback)."""
