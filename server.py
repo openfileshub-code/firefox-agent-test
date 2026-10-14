@@ -342,8 +342,56 @@ async def browser_navigate(url: str, new_tab: bool = False) -> dict:
 
 
 @mcp.tool()
-async def browser_click_text(text: str, index: int = 0) -> dict:
-    return await call("click_text", {"text": text, "index": index})
+async def browser_go_back(timeout: int = 45) -> dict:
+    """Шаг НАЗАД по истории вкладки (обёртка над page.go_back()).
+
+    Использовать вместо перезагрузки URL, когда нужно «вернуться».
+    Если предыдущей страницы в истории нет, вернёт ok=true и
+    went_back=false (это штатная ситуация, а не ошибка).
+    """
+    return await call("go_back", {"timeout": timeout})
+
+
+@mcp.tool()
+async def browser_history_back(timeout: int = 45) -> dict:
+    """Синоним browser_go_back (шаг назад по истории вкладки)."""
+    return await call("go_back", {"timeout": timeout})
+
+
+@mcp.tool()
+async def browser_go_forward(timeout: int = 45) -> dict:
+    """Шаг ВПЕРЁД по истории вкладки (симметрично browser_go_back)."""
+    return await call("go_forward", {"timeout": timeout})
+
+
+@mcp.tool()
+async def browser_click_text(
+    text: str = "",
+    index: int = 0,
+    selector: str = "",
+) -> dict:
+    """Клик по тексту элемента ИЛИ по CSS-селектору.
+
+    Args:
+        text: подстрока текста элемента (fuzzy-поиск get_by_text).
+        index: индекс среди найденных совпадений (по умолчанию 0).
+        selector: CSS-селектор — для иконочных кнопок без текста
+            (например "button[aria-label='Гид']"). Если text пуст и
+            selector задан — клик выполняется по селектору.
+    """
+    if not str(text).strip() and not str(selector).strip():
+        raise ValueError("Укажите хотя бы одно: text или selector")
+    return await call("click_text", {
+        "text": text, "index": index, "selector": selector
+    })
+
+
+@mcp.tool()
+async def browser_click_selector(selector: str) -> dict:
+    """Клик по CSS-селектору (для кнопок/иконок без текста)."""
+    if not str(selector).strip():
+        raise ValueError("CSS selector не задан")
+    return await call("click_selector", {"selector": selector})
 
 
 @mcp.tool()
@@ -423,10 +471,22 @@ async def browser_video(
 
     Адаптер выбирается автоматически по URL/DOM (YouTube, Twitch, VK Video,
     Rutube или generic HTML5 fallback). Поддерживаемые действия:
-    play, pause, volume/set_volume (percent), seek (seconds), state,
+    play, pause, volume/set_volume, seek (seconds), state,
     set_quality ('480p', '1080p60', 'Auto'... — через UI-автоматизацию,
-    без устаревшего IFrame API), toggle_theater_mode, next_video,
-    toggle_chat_visibility, fullscreen_enter, detect_login.
+    без устаревшего IFrame API), toggle_theater_mode (алиасы:
+    theater_toggle, toggle_theater, theater_mode, theater, set_theater),
+    next_video, toggle_chat_visibility, fullscreen_enter, detect_login.
+
+    Поле value для volume принимает доли 0..1 либо проценты 0..100
+    (авто-нормализация). Действие 'state' возвращает расширенный статус:
+    помимо fullscreen — theater_mode, full_window_mode, cinematics
+    (для YouTube определяется по ytp-theater-mode / html5-theater-mode /
+    классу theater; cinematics НЕ считается театральным режимом).
+
+    Переключение театрального режима выполняется системой дублирующих
+    каналов: aria/text-кнопка -> CSS .ytp-size-button -> горячая клавиша
+    't' -> JS click(), с верификацией смены класса после каждого канала.
+
     Результат содержит поля 'adapter' и 'platform'.
     """
     return await call("video_action", {"action": action, "value": value})
