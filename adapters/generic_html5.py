@@ -71,7 +71,9 @@ class GenericHTML5Adapter(BaseVideoAdapter):
 
     async def set_volume(self, percent: float) -> dict[str, Any]:
         await self._ensure_video()
-        return await self._html5("volume_set", percent)
+        # Делегируем базовой реализации с верификацией (правка №7):
+        # без video_controller _html5 вернёт структурированную ошибку.
+        return await BaseVideoAdapter.set_volume(self, percent)
 
     async def seek(self, seconds: float) -> dict[str, Any]:
         await self._ensure_video()
@@ -79,7 +81,9 @@ class GenericHTML5Adapter(BaseVideoAdapter):
 
     async def state(self) -> dict[str, Any]:
         await self._ensure_video()
-        return await self._html5("state")
+        # Базовая реализация добавляет платформенные поля (theater_mode=None,
+        # fullscreen) — см. правку №2.
+        return await BaseVideoAdapter.state(self)
 
     async def fullscreen_enter(self) -> dict[str, Any]:
         await self._ensure_video()

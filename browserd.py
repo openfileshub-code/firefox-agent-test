@@ -395,6 +395,77 @@ class BrowserController:
         with contextlib.suppress(Exception):
             page.on("dialog", self._on_dialog_event)
 
+        self._install_dialog_shield(page)
+
+    #: JS-щит модальных окон (системная правка №4). Инжектится в каждую
+    #: вкладку до выполнения скриптов страницы: window.alert/confirm/prompt
+    #: перестают блокировать браузер — alert игнорируется, confirm/prompt
+    #: возвращают безопасные значения. Нативный dialog-хук остаётся как
+    #: второй слой защиты (на случай, если страница восстановила оригиналы).
+    _DIALOG_SHIELD_JS = r"""
+(() => {
+  if (window.__browserdDialogShield) return;
+  window.__browserdDialogShield = true;
+  try {
+    const nativeAlert = window.alert ? window.alert.bind(window) : null;
+    const nativeConfirm = window.confirm ? window.confirm.bind(window) : null;
+    const nativePrompt = window.prompt ? window.prompt.bind(window) : null;
+    window.__browserdNativeDialogs =
+      { alert: nativeAlert, confirm: nativeConfirm, prompt: nativePrompt };
+  } catch (e) {}
+  const log = [];
+  window.__browserdDialogLog = log;
+  const record = (type, message, result) => {
+    try {
+      log.push({ type, message: String(message ?? '').slice(0, 500),
+                 result, time: Date.now() });
+      if (log.length > 50) log.splice(0, log.length - 50);
+    } catch (e) {}
+  };
+  window.alert = (message) => { record('alert', message, 'ignored'); };
+  window.confirm = (message) => {
+    record('confirm', message, false);
+    return false;              // штатный ответ «Отмена»
+  };
+  window.prompt = (message, defaultValue) => {
+    record('prompt', message, defaultValue ?? null);
+    return (defaultValue === undefined || defaultValue === null)
+      ? null                   // штатный ответ «Отмена»
+      : String(defaultValue);  // значение по умолчанию вместо блокировки
+  };
+})();
+"""
+
+    def _install_dialog_shield(self, page: Any) -> None:
+        """Ставит JS-щит и на текущий документ, и на все будущие навигации."""
+        # API BrowserContext в разных версиях/сборках называется по-разному
+        # (add_init_script / addInitScript) — пробуем оба.
+        for method_name in ("add_init_script", "addInitScript"):
+            try:
+                if self.context is not None and hasattr(
+                        self.context, method_name):
+                    getattr(self.context, method_name)(
+                        script=self._DIALOG_SHIELD_JS)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+
+        applied = False
+        for method_name in ("add_init_script", "addInitScript"):
+            try:
+                if hasattr(page, method_name):
+                    getattr(page, method_name)(script=self._DIALOG_SHIELD_JS)
+                    applied = True
+            except Exception:  # noqa: BLE001
+                continue
+        if not applied:
+            log.warning("Page.add_init_script недоступен; щит ставится "
+                        "только через evaluate в текущий документ")
+
+        # Текущий документ уже мог выполняться без щита — ставим немедленно.
+        with contextlib.suppress(Exception):
+            page.evaluate(self._DIALOG_SHIELD_JS)
+
     @staticmethod
     def _schedule(coro) -> None:
         try:
@@ -454,6 +525,31 @@ class BrowserController:
         self._network_events = self._network_events[-100:]
 
     def _on_dialog_event(self, dialog: Any) -> None:
+        # Системная правка №4: JS-щит (см. _DIALOG_SHIELD_JS) перехватывает
+        # alert/confirm/prompt до появления нативного диалога. Если диалог
+        # всё-таки возник (страница восстановила оригиналы window.*, либо
+        # это beforeunload/beforeprint), он не должен блокировать браузер:
+        # отвечаем штатным значением сразу и не ждём решения агента.
+        try:
+            dtype = str(getattr(dialog, "type", "") or "").lower()
+        except Exception:  # noqa: BLE001
+            dtype = ""
+
+        if dtype in ("alert", "beforeunload", "beforeprint"):
+            self._schedule(self._dismiss_dialog(dialog))
+            return
+        if dtype == "confirm":
+            self._schedule(self._dismiss_dialog(dialog))  # == «Отмена»
+            return
+        if dtype == "prompt":
+            async def _answer_prompt() -> None:
+                with contextlib.suppress(Exception):
+                    await dialog.accept(
+                        str(getattr(dialog, "default_value", "")
+                            or getattr(dialog, "defaultValue", "") or ""))
+            self._schedule(_answer_prompt())
+            return
+
         if self._dialog_task and not self._dialog_task.done():
             # Не оставляем второй неизвестный диалог блокировать вкладку.
             self._schedule(self._dismiss_dialog(dialog))
@@ -722,6 +818,65 @@ class BrowserController:
             "tab_id": self._page_id(page),
         }
 
+    async def cmd_go_back(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Шаг назад по истории вкладки (системная правка №5).
+
+        Обёртка над page.go_back(): агенту больше не нужно «возвращаться»
+        перезагрузкой URL. Если предыдущей страницы в истории нет
+        (например, вкладка только что открыта), go_back вернёт None —
+        это штатная ситуация, а не ошибка.
+        """
+        page = await self.require_page(params)
+        timeout_ms = max(
+            1000,
+            min(int(params.get("timeout", 45)), 180) * 1000,
+        )
+
+        before_url = page.url
+        with contextlib.suppress(Exception):
+            await page.bring_to_front()
+
+        response = await page.go_back(wait_until="domcontentloaded",
+                                      timeout=timeout_ms)
+
+        if self.link_cache:
+            with contextlib.suppress(Exception):
+                self.link_cache.mark_dirty()
+
+        return {
+            "ok": True,
+            "went_back": response is not None,
+            "from_url": before_url,
+            "url": page.url,
+            "title": await page.title(),
+            "http_status": getattr(response, "status", None),
+        }
+
+    async def cmd_go_forward(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Шаг вперёд по истории вкладки (симметрично cmd_go_back)."""
+        page = await self.require_page(params)
+        timeout_ms = max(
+            1000,
+            min(int(params.get("timeout", 45)), 180) * 1000,
+        )
+
+        before_url = page.url
+        response = await page.go_forward(wait_until="domcontentloaded",
+                                         timeout=timeout_ms)
+
+        if self.link_cache:
+            with contextlib.suppress(Exception):
+                self.link_cache.mark_dirty()
+
+        return {
+            "ok": True,
+            "went_forward": response is not None,
+            "from_url": before_url,
+            "url": page.url,
+            "title": await page.title(),
+            "http_status": getattr(response, "status", None),
+        }
+
     async def cmd_new_tab(self, params: dict[str, Any]) -> dict[str, Any]:
         if not self.context:
             raise RuntimeError("BrowserContext не запущен")
@@ -830,10 +985,20 @@ class BrowserController:
         }
 
     async def cmd_click_text(self, params: dict[str, Any]) -> dict[str, Any]:
-        page = await self.require_page(params)
+        # Совмещённый интерфейс (системная правка №1): если передан
+        # selector и не передан text — кликаем по селектору. Это даёт
+        # агенту возможность нажимать иконочные кнопки без текста,
+        # найденные через browser_eval.
+        selector = str(params.get("selector") or "").strip()
         text = str(params.get("text") or "").strip()
+        if selector and not text:
+            return await self.cmd_click_selector_impl({**params,
+                                                       "selector": selector})
+
+        page = await self.require_page(params)
         if not text:
-            return {"ok": False, "error": "Текст не задан"}
+            return {"ok": False,
+                    "error": "Не задан ни текст, ни CSS selector"}
 
         index = int(params.get("index", 0))
         timeout_ms = max(1000, min(int(params.get("timeout", 10)), 60) * 1000)
@@ -1455,6 +1620,17 @@ class BrowserController:
             log.debug("Не удалось собрать DOM-образец для реестра", exc_info=True)
             return {}
 
+    #: Псевдонимы действий browser_video (системные правки №2, №3).
+    #: Нормализуются ДО маршрутизации адаптера.
+    _VIDEO_ACTION_ALIASES = {
+        "theater_toggle": "toggle_theater_mode",
+        "toggle_theater": "toggle_theater_mode",
+        "theater_mode": "toggle_theater_mode",
+        "theater": "toggle_theater_mode",
+        "set_theater": "toggle_theater_mode",
+        "back": "go_back",  # на случай, если агент вызовет через video_action
+    }
+
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         action = str(params.get("action") or "").strip().lower()
@@ -1462,6 +1638,35 @@ class BrowserController:
 
         if not action:
             return {"ok": False, "error": "Действие с видео не задано"}
+
+        action = self._VIDEO_ACTION_ALIASES.get(action, action)
+
+        # Системная правка №7: «сброс громкости» — это YouTube-фича
+        # (после v/volume_up/volume_down плеер возвращает сохранённую
+        # пользователем громкость), а не HTML5-поведение. Прямое
+        # v.volume=... при этом конфликтует с youtubewebembed и
+        # yt-cinematics, которые перехватывают атрибут volume и
+        # переписывают его обратно. Поэтому для платформенных
+        # адаптеров volume_set идёт отдельным защищённым путём.
+        if action in ("volume_set", "volume", "set_volume"):
+            try:
+                from adapters.registry import get_adapter as _get_adapter
+
+                _dom_sample = await self._collect_dom_sample(page)
+                _adapter = _get_adapter(
+                    page,
+                    page_url=getattr(page, "url", "") or None,
+                    page_dom_sample=_dom_sample,
+                    video_controller=self.video_controller,
+                )
+                if type(_adapter).__name__ != "GenericHTML5Adapter" and \
+                        hasattr(_adapter, "set_volume"):
+                    result = await _adapter.set_volume(value)
+                    if isinstance(result, dict):
+                        result.setdefault("platform", _adapter.platform)
+                        return result
+            except ImportError:
+                pass
 
         # --- Маршрутизация через систему адаптеров (ТЗ раздел 2) ---
         try:

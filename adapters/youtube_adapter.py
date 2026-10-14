@@ -191,34 +191,312 @@ class YoutubeAdapter(BaseVideoAdapter):
             return ""
 
     # ------------------------------------------------------------------
-    # Theater mode
+    # Volume (системная правка №7): обход «сброса громкости» на YouTube
     # ------------------------------------------------------------------
-    async def toggle_theater_mode(self) -> dict[str, Any]:
-        aria_labels = self.selectors.get(
-            "theater_aria", ["Theater mode", "Широкоэкранный режим"])
-        before_class = await self._player_container_class()
-        btn = await self._find_by_aria(aria_labels, timeout_ms=3000)
-        if btn is None:
-            btn = await self._find_by_text(aria_labels, timeout_ms=1500)
-        if btn is None:
-            raise ElementNotFoundError(
-                "YouTube: кнопка театрального режима не найдена",
-                tried_aria=aria_labels,
+    async def set_volume(self, percent: float) -> dict[str, Any]:
+        """Установка громкости с защитой от перехвата атрибута volume.
+
+        Причины «сброса громкости», которые здесь закрываются:
+        1. Расширения youtubewebembed / yt-cinematics переопределяют
+           сеттер ``volume`` на HTMLMediaElement и при любом
+           ``v.volume = x`` вызывают ``player.updateVolumeSettings()``
+           (или применяют собственную сохранённую громкость), из-за чего
+           значение сразу возвращается к прежнему. Обход: запись через
+           оригинальный нативный сеттер из window.wrappedJSObject
+           (обходит JS-перехват расширения) + повторная верификация.
+        2. Собственная логика плеера: после клавиш v / +/- / стрелок
+           YouTube возвращает громкость, сохранённую в настройках
+           аккаунта. Это штатное поведение продукта; оно не является
+           ошибкой автоматизации, поэтому результат явно помечается
+           полем ``verified`` — если значение не удержалось, агент
+           получает предупреждение вместо молчаливого сбоя.
+        3. muted=true маскирует громкость: перед установкой звук
+           включается.
+        """
+        try:
+            target = self._normalize_volume_arg(percent)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": ("set_volume требует число: 0..1 или проценты "
+                            "0..100 (например 50 или 0.5)"),
+            }
+
+        # Шаг 1: запись через нативный сеттер, минуя JS-перехваты
+        # расширений (youtubewebembed/yt-cinematics).
+        direct_ok = False
+        try:
+            direct_ok = bool(await self.page.evaluate(r"""
+            (target) => {
+              const v = document.querySelector('video');
+              if (!v) return false;
+              v.muted = false;
+              let proto = Object.getPrototypeOf(v);
+              let desc = null;
+              while (proto && !desc) {
+                desc = Object.getOwnPropertyDescriptor(proto, 'volume');
+                proto = Object.getPrototypeOf(proto);
+              }
+              // wrappedJSObject даёт non-adopted копию элемента Firefox:
+              // её свойства не видят expando-сеттеры из контентных скриптов.
+              const w = window.wrappedJSObject;
+              const vw = (w && w.document) ? w.document.querySelector('video') : null;
+              if (vw) {
+                try { vw.muted = false; } catch (e) {}
+                try { vw.volume = target; } catch (e) {}
+              }
+              if (desc && desc.set) {
+                try { desc.set.call(v, target); } catch (e) {}
+              } else {
+                try { v.volume = target; } catch (e) {}
+              }
+              return true;
+            }
+            """, target))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("YouTube volume: прямой канал недоступен: %s", exc)
+
+        if not direct_ok:
+            # Fallback: обычный HTML5-путь (generic-страницы без плеера YT).
+            result = await super().set_volume(percent)
+            if isinstance(result, dict):
+                result.setdefault("method", "html5_fallback")
+            return result
+
+        # Шаг 2: верификация с переустановкой (наследует защиту base.py).
+        verified = await self._verify_volume(target, attempts=3, delay=0.25)
+        if not verified.get("applied"):
+            # Шаг 3 (дубль по спецификации): горячие клавиши плеера.
+            # Up/Down меняют громкость шагами ~4.5% — точного значения
+            # они не гарантируют, но фиксируют выбор в настройках плеера
+            # и обходят программные перехваты. Пробуем только если
+            # прямая запись так и не закрепилась.
+            await self._volume_via_hotkeys(target)
+            verified = await self._verify_volume(target, attempts=2, delay=0.3)
+
+        state = await self._html5("state")
+        volume_now, muted_now = await self._read_video_volume()
+        out: dict[str, Any] = {
+            "ok": True,
+            "action": "set_volume",
+            "requested_percent": round(target * 100, 1),
+            "volume": volume_now,
+            "muted": muted_now,
+            "verified": bool(verified.get("applied")),
+            "retries": verified.get("attempts", 0),
+            "method": "native_setter_wrappedJSObject" if direct_ok else "html5",
+            "platform": self.platform,
+        }
+        if isinstance(state, dict) and isinstance(state.get("state"), dict):
+            out["state"] = state["state"]
+        if not out["verified"]:
+            out["warning"] = (
+                "Громкость не зафиксирована: значение переопределяется "
+                "плеером/расширением (типично для youtubewebembed, "
+                "yt-cinematics или функции «восстанавливать сохранённую "
+                "громкость» YouTube). Отключите расширение или измените "
+                "громкость вручную в настройках плеера."
             )
+        return out
+
+    async def _volume_via_hotkeys(self, target: float) -> None:
+        """Грубая подстройка громкости клавишами ↑/↓ (±~4.5% за нажатие)."""
+        try:
+            current, _muted = await self._read_video_volume()
+            if current is None:
+                return
+            step = 0.045
+            diff = target - current
+            presses = int(round(abs(diff) / step))
+            if presses == 0 or presses > 25:
+                return
+            key = "ArrowUp" if diff > 0 else "ArrowDown"
+            for _ in range(presses):
+                await self.page.keyboard.press(key)
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("YouTube volume: клавиши-дублёры не сработали: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Theater mode (системные правки №2, №3)
+    # ------------------------------------------------------------------
+    async def get_player_modes(self) -> dict[str, Any]:
+        """YouTube-специфичные режимы: theater/fullscreen/small-player.
+
+        Театральный режим определяется по классам контейнера и плеера:
+        * ``html5-theater-mode`` / ``ytp-theater-mode`` — современный
+          wide/theater-режим watch-страницы;
+        * ``theater`` — legacy-класс (и стендовые реализации);
+        * ``html5-full-window-mode`` / ``ytp-full-window`` — «весь экран»;
+        * ``html5-small-player-mode`` — компактный плеер (по умолчанию).
+        Отдельно помечается кинематографический режим yt-cinematics
+        (``cinematics-enabled``), который НЕ является theater-режимом.
+        """
+        modes = await super().get_player_modes()
+        try:
+            info = await self.page.evaluate(r"""
+            () => {
+              const out = { theater: false, full_window: false,
+                            small_player: false, cinematics: false,
+                            container_class: '' };
+              const sels = ['#movie_player', '#ytd-player',
+                            'ytd-watch-flexy', '.html5-video-container'];
+              for (const sel of sels) {
+                for (const el of document.querySelectorAll(sel)) {
+                  const cls = (el.className || '') + '';
+                  if (/html5-theater-mode|ytp-theater-mode|\btheater\b/i.test(cls))
+                    out.theater = true;
+                  if (/full-window/i.test(cls)) out.full_window = true;
+                  if (/small-player/i.test(cls)) out.small_player = true;
+                  if (/cinematics-enabled/i.test(cls)) out.cinematics = true;
+                }
+              }
+              const mp = document.querySelector('#movie_player');
+              if (mp) out.container_class = String(mp.className || '');
+              return out;
+            }
+            """) or {}
+        except Exception:  # noqa: BLE001
+            info = {}
+        modes["theater_mode"] = bool(info.get("theater"))
+        modes["full_window_mode"] = bool(info.get("full_window"))
+        modes["small_player_mode"] = bool(info.get("small_player"))
+        modes["cinematics"] = bool(info.get("cinematics"))
+        modes["container_class"] = str(info.get("container_class", ""))[:300]
+        return modes
+
+    async def toggle_theater_mode(self) -> dict[str, Any]:
+        """Переключение театрального режима с дублирующими каналами (правка №3).
+
+        Надёжная последовательность (spec YouTube 2024-2026):
+        1. aria/text-поиск кнопки (локале-независимые метки);
+        2. CSS .ytp-size-button (кнопка в контроллере плеера);
+        3. горячая клавиша «t» (официальная клавиша theater-режима);
+        4. программный вызов .ytp-size-button.click();
+        после каждого канала — проверка смены состояния; ошибка только
+        если НИ ОДИН канал не изменил режим.
+        """
+        before = await self.get_player_modes()
+        tried: list[str] = []
+
+        channels = (
+            ("aria_button", self._theater_channel_aria),
+            ("css_size_button", self._theater_channel_css),
+            ("hotkey_t", self._theater_channel_hotkey),
+            ("js_click", self._theater_channel_js),
+        )
+
+        for name, channel in channels:
+            applied = False
+            try:
+                applied = await channel()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("YouTube theater: канал %s исключение: %s",
+                               name, exc)
+            if not applied:
+                tried.append(f"{name}: элемент/действие недоступны")
+                continue
+            tried.append(name)
+
+            after = await self.get_player_modes()
+            if after.get("theater_mode") != before.get("theater_mode"):
+                return {
+                    "ok": True,
+                    "action": "toggle_theater_mode",
+                    "method": name,
+                    "theater_mode": after.get("theater_mode"),
+                    "before_class": before.get("container_class", ""),
+                    "after_class": after.get("container_class", ""),
+                    "container_changed": (
+                        before.get("container_class", "")
+                        != after.get("container_class", "")
+                    ),
+                    "tried_channels": tried,
+                }
+            logger.info(
+                "YouTube theater: канал %s выполнен, состояние не изменилось",
+                name)
+
+        raise ElementNotFoundError(
+            "YouTube: переключение театрального режима не подтверждено ни "
+            "одним из каналов (aria-кнопка, .ytp-size-button, клавиша «t», "
+            "JS click). Возможно, страница ещё не загрузила плеер или "
+            "режим недоступен на этом типе страницы.",
+            tried_channels=tried,
+            before_theater=before.get("theater_mode"),
+        )
+
+    async def _theater_channel_aria(self) -> bool:
+        aria_labels = self.selectors.get(
+            "theater_aria",
+            ["Theater mode", "Широкоэкранный режим",
+             "Toggle theater mode", "Переключить широкоэкранный режим",
+             "Widescreen mode", "Wide screen mode"])
+        btn = await self._find_by_aria(aria_labels, timeout_ms=2000)
+        if btn is None:
+            btn = await self._find_by_text(aria_labels, timeout_ms=800)
+        if btn is None:
+            return False
         try:
             await btn.click(timeout=2000)
+            return True
         except Exception as exc:  # noqa: BLE001
-            raise ElementNotFoundError(
-                f"YouTube: клик по кнопке theater mode не удался: {exc}") from exc
-        await asyncio.sleep(0.6)
-        after_class = await self._player_container_class()
-        return {
-            "ok": True,
-            "action": "toggle_theater_mode",
-            "container_changed": before_class != after_class,
-            "before_class": before_class,
-            "after_class": after_class,
-        }
+            logger.warning("YouTube theater: клик по aria-кнопке: %s", exc)
+            return False
+
+    async def _theater_channel_css(self) -> bool:
+        selector = self.selectors.get(
+            "theater_button_selector", ".ytp-size-button")
+        btn = self.page.locator(selector).first
+        try:
+            await btn.wait_for(state="visible", timeout=1500)
+            await btn.click(timeout=2000)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _theater_channel_hotkey(self) -> bool:
+        """Горячая клавиша «t» (официальная клавиша theater-режима YT).
+
+        Перед отправкой фокус уводится с текстовых полей/чата, иначе
+        «t» будет набрана как текст, а не как команда плеера.
+        """
+        try:
+            await self.page.evaluate(r"""
+            () => {
+              const ae = document.activeElement;
+              if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA'
+                         || ae.isContentEditable)) ae.blur();
+              const player = document.querySelector('#movie_player')
+                          || document.querySelector('video');
+              if (player) {
+                try { player.focus({ preventScroll: true }); } catch (e) {}
+              }
+            }
+            """)
+            await self.page.keyboard.press("t")
+            await asyncio.sleep(0.4)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("YouTube theater: клавиша «t»: %s", exc)
+            return False
+
+    async def _theater_channel_js(self) -> bool:
+        try:
+            clicked = await self.page.evaluate(r"""
+            () => {
+              const btn = document.querySelector('.ytp-size-button');
+              if (!btn) return false;
+              btn.click();
+              return true;
+            }
+            """)
+            await asyncio.sleep(0.3)
+            return bool(clicked)
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _player_container_class(self) -> str:
         container = self.selectors.get("player_container", "#movie_player")
