@@ -259,7 +259,8 @@ class YoutubeAdapter(BaseVideoAdapter):
 
         if not direct_ok:
             # Fallback: обычный HTML5-путь (generic-страницы без плеера YT).
-            result = await super().set_volume(percent)
+            # Передаём уже нормализованную долю target, а не сырой percent.
+            result = await super().set_volume(target)
             if isinstance(result, dict):
                 result.setdefault("method", "html5_fallback")
             return result

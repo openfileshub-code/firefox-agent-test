@@ -159,7 +159,18 @@ class BaseVideoAdapter:
         return await self._html5("pause")
 
     async def set_volume(self, percent: float) -> dict[str, Any]:
-        return await self._html5("volume_set", percent)
+        # Правка №7: нормализуем аргумент (доли 0..1 и проценты 0..100),
+        # чтобы VideoController всегда получал значение в диапазоне 0..1.
+        try:
+            fraction = self._normalize_volume_arg(percent)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": ("set_volume требует число: доля 0..1 или "
+                            "проценты 0..100 (например 50 или 0.5)"),
+            }
+        return await self._html5("volume_set", fraction)
 
     async def seek(self, seconds: float) -> dict[str, Any]:
         return await self._html5("seek_to", seconds)
@@ -202,13 +213,23 @@ class BaseVideoAdapter:
         переустанавливается. Платформенные адаптеры могут добавить
         свои каналы (клавиши, UI-слайдер).
         """
-        first = await self._html5("volume_set", percent)
+        # Правка №7: единая нормализация формата аргумента (0..1 / 0..100).
+        try:
+            target = self._normalize_volume_arg(percent)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": ("set_volume требует число: доля 0..1 или "
+                            "проценты 0..100 (например 50 или 0.5)"),
+            }
+
+        first = await self._html5("volume_set", target)
         if not isinstance(first, dict):
             return first
         if not first.get("ok"):
             return first
 
-        target = self._normalize_volume_arg(percent)
         verified = await self._verify_volume(target, attempts=3, delay=0.25)
         first.setdefault("state", {})
         if isinstance(first["state"], dict):
