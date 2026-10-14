@@ -79,12 +79,12 @@ class VideoController:
 
         value = None
         if action == "volume_set":
-            raw = str(param).strip()
-            value = (
-                self._number(raw[:-1], "Громкость", 0, 100) / 100
-                if raw.endswith("%")
-                else self._number(raw, "Громкость", 0, 1)
-            )
+            # Правка №7: универсальный разбор формата — принимаем и доли
+            # 0..1, и проценты 0..100 (целые вида 50 раньше падали с
+            # ValueError "допустимый диапазон 0…1"). Результат — всегда доля.
+            raw = str(param).strip().rstrip("%").replace(",", ".")
+            number = self._number(raw, "Громкость", 0, 100)
+            value = number / 100.0 if number > 1.0 else number
         elif action in ("volume_up", "volume_down"):
             value = self._number(
                 param if param is not None else 0.1,
