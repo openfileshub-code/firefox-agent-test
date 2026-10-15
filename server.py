@@ -27,6 +27,7 @@ from modules.settings_loader import (                        # noqa: E402
 )
 from modules import url_validator as uv                      # noqa: E402
 from modules.relevance_ranker import RelevanceRanker          # noqa: E402
+from modules.audit_logger import get_audit_logger             # noqa: E402
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -99,6 +100,7 @@ SETTINGS_LOADER.load()
 init_global_loader(SETTINGS_LOADER)
 
 CONTEXT_MANAGER = ContextManager(settings=SETTINGS_LOADER.get())
+AUDIT = get_audit_logger()
 POLICY_GUARD = PolicyGuard(SETTINGS_LOADER, CONTEXT_MANAGER)
 
 
