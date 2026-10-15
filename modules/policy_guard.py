@@ -329,7 +329,8 @@ class PolicyGuard:
     def _check_eval(self, args) -> PolicyDecision:
         # совместимость аргументов: server/browserd используют "js",
         # агенты иногда передают "expression"
-        js = str(args.get("js") or args.get("expression") or "")
+        js = str(args.get("js") or args.get("expression")
+                 or args.get("script") or "")
         if EVAL_VIDEO_RE.search(js):
             code = ("POLICY_THEATER_NOT_FULLSCREEN"
                     if FULLSCREEN_RE.search(js)
