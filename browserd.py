@@ -1780,7 +1780,7 @@ class BrowserController:
 
     #: Действия, требующие контекст эпизодов/плейлиста (ТЗ этап 9).
     _EPISODE_ACTIONS = {"episode_list", "episode_next", "episode_prev",
-                        "episode_open"}
+                        "episode_open", "chapter_list", "chapter_seek"}
 
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
@@ -1814,6 +1814,10 @@ class BrowserController:
                 return await self.cmd_episode_prev(ep_params)
             if action == "episode_open":
                 return await self.cmd_episode_open(ep_params)
+            if action == "chapter_list":
+                return await self.cmd_chapter_list(ep_params)
+            if action == "chapter_seek":
+                return await self.cmd_chapter_seek(ep_params)
 
         # Системная правка №7: «сброс громкости» — это YouTube-фича
         # (после v/volume_up/volume_down плеер возвращает сохранённую
