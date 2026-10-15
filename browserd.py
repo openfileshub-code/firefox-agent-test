@@ -788,6 +788,114 @@ class BrowserController:
             "active": self.active_index,
         }
 
+    #: JS-сниппет: видео-идентификаторы страницы YouTube из ytInitialData
+    #: (нативный источник list_id/index/is_radio — без URL-парсинга).
+    _YT_INITIAL_DATA_JS = r"""
+    () => {
+      const out = {};
+      try {
+        const d = window.ytInitialData;
+        if (!d) return out;
+        const contents = (((d.contents || {}).twoColumnWatchNextResults || {})
+          .playlist || {}).playlist || {};
+        const listId = contents.listId || null;
+        if (listId) { out.list_id = listId; }
+        const items = contents.results || [];
+        let index = null;
+        const vid = ((document.querySelector('#movie_player') || {})
+                     .getVideoData) ? null : null;
+        let current = null;
+        try {
+          const mp = document.querySelector('#movie_player');
+          if (mp && typeof mp.getVideoData === 'function') {
+            current = (mp.getVideoData() || {}).video_id || null;
+          }
+        } catch (e) { /* getVideoData недоступен */ }
+        if (!current) {
+          const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+          current = m ? m[1] : null;
+        }
+        if (current) out.video_id = current;
+        items.forEach((it, i) => {
+          const vid = ((((it.playlistVideoRenderer || {}).videoId) ||
+                        ((it.compactVideoRenderer || {}).videoId)));
+          if (vid && vid === current) index = i;
+        });
+        if (index !== null) out.index = index;
+        if (listId && /^RD/.test(listId)) out.is_radio = true;
+        if (items.length) out.episode_count = items.length;
+      } catch (e) { /* не YouTube / иная структура */ }
+      return out;
+    }
+    """
+
+    async def cmd_context_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Снимок активного контекста вкладки для ContextManager/PolicyGuard.
+
+        Возвращает url/title/tab_id + video_id/list_id/index/is_radio
+        (URL + ytInitialData) и layout-режимы плеера. Используется
+        инструментом browser_get_context (server.py) и middleware для
+        наполнения BrowserContext (RC5/RC10/RC11).
+        """
+        page = await self.require_page(params)
+        result: dict[str, Any] = {
+            "ok": True,
+            "url": page.url,
+            "title": await page.title(),
+            "tab_id": self._page_id(page),
+            "video_id": None,
+            "list_id": None,
+            "index": None,
+            "is_radio": False,
+            "has_episode_queue": False,
+        }
+
+        # 1) Идентификаторы из URL (дёшево и надёжно).
+        with contextlib.suppress(Exception):
+            from urllib.parse import urlparse, parse_qs
+            parts = urlparse(page.url or "")
+            qs = parse_qs(parts.query)
+            vid = (qs.get("v") or [""])[0]
+            if vid:
+                result["video_id"] = vid
+            lid = (qs.get("list") or [""])[0]
+            if lid:
+                result["list_id"] = lid
+            idx = (qs.get("index") or [""])[0]
+            if idx.isdigit():
+                result["index"] = int(idx)
+            if (qs.get("start_radio") or [""])[0] == "1" or lid.startswith("RD"):
+                result["is_radio"] = True
+
+        # 2) Нативные данные страницы (ytInitialData / getVideoData).
+        with contextlib.suppress(Exception):
+            native = await page.evaluate(self._YT_INITIAL_DATA_JS) or {}
+            for key in ("video_id", "list_id", "index", "is_radio"):
+                if native.get(key) is not None and result.get(key) in (None, False):
+                    result[key] = native[key]
+            if native.get("episode_count"):
+                result["has_episode_queue"] = True
+                result["episode_count"] = native["episode_count"]
+
+        # 3) Layout плеера через адаптер (multi-signal theater/fullscreen).
+        try:
+            from adapters.registry import get_adapter
+
+            adapter = get_adapter(
+                page,
+                page_url=getattr(page, "url", "") or None,
+                page_dom_sample=await self._collect_dom_sample(page),
+                video_controller=self.video_controller,
+            )
+            modes = await adapter.get_player_modes()
+            if isinstance(modes, dict):
+                result["layout"] = modes.get("layout_state") or {}
+                result["state"] = modes
+        except Exception:  # noqa: BLE001
+            log.debug("context.get: адаптер недоступен", exc_info=True)
+
+        return result
+
     async def cmd_navigate(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         url = self._normalize_url(params.get("url"))
@@ -1622,14 +1730,24 @@ class BrowserController:
 
     #: Псевдонимы действий browser_video (системные правки №2, №3).
     #: Нормализуются ДО маршрутизации адаптера.
+    #: ВАЖНО: set_theater/wide_mode/theater_on/theater_off — это НЕ toggle,
+    #: а идемпотентный theater_set (RC7): повторный запрос того же режима
+    #: не должен менять состояние.
     _VIDEO_ACTION_ALIASES = {
         "theater_toggle": "toggle_theater_mode",
         "toggle_theater": "toggle_theater_mode",
         "theater_mode": "toggle_theater_mode",
         "theater": "toggle_theater_mode",
-        "set_theater": "toggle_theater_mode",
+        "set_theater": "theater_set",
+        "wide_mode": "theater_set",
+        "theater_on": "theater_set",
+        "theater_off": "theater_set",
         "back": "go_back",  # на случай, если агент вызовет через video_action
     }
+
+    #: Действия, требующие контекст эпизодов/плейлиста (ТЗ этап 9).
+    _EPISODE_ACTIONS = {"episode_list", "episode_next", "episode_prev",
+                        "episode_open"}
 
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
@@ -1638,6 +1756,14 @@ class BrowserController:
 
         if not action:
             return {"ok": False, "error": "Действие с видео не задано"}
+
+        # «включить/выключить» из action_map настроек может прийти строкой.
+        if action == "theater_set" and isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "on", "включить", "да"):
+                value = True
+            elif low in ("false", "0", "off", "выключить", "нет"):
+                value = False
 
         action = self._VIDEO_ACTION_ALIASES.get(action, action)
 
@@ -1724,6 +1850,162 @@ class BrowserController:
         return {
             "ok": False,
             "error": "VideoController не загружен",
+        }
+
+    # ------------------------------------------------------------------
+    # Нативная навигация по эпизодам YouTube (ТЗ этап 9)
+    # ------------------------------------------------------------------
+    _EPISODE_LIST_JS = r"""
+    () => {
+      const out = {list_id: null, video_id: null, index: null, episodes: []};
+      try {
+        const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+        out.video_id = m ? m[1] : null;
+        const d = window.ytInitialData;
+        if (!d) return out;
+        const contents = (((d.contents || {}).twoColumnWatchNextResults || {})
+          .playlist || {}).playlist || {};
+        out.list_id = contents.listId || null;
+        const items = contents.results || [];
+        items.forEach((it, i) => {
+          const r = it.playlistVideoRenderer || it.compactVideoRenderer || {};
+          if (!r.videoId) return;
+          let title = '';
+          try {
+            title = ((r.title || {}).runs || []).map(x => x.text).join('');
+          } catch (e) { title = ''; }
+          if (r.videoId === out.video_id) out.index = i;
+          out.episodes.push({index: i, video_id: r.videoId,
+                             title: String(title || '').slice(0, 200)});
+        });
+      } catch (e) { /* не YouTube */ }
+      return out;
+    }
+    """
+
+    def _watch_url(self, video_id: str, list_id=None, index=None) -> str:
+        url = "https://www.youtube.com/watch?v=" + video_id
+        if list_id:
+            url += "&list=" + list_id
+        if index is not None:
+            url += "&index=" + str(int(index))
+        return url
+
+    async def cmd_episode_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        data = await page.evaluate(self._EPISODE_LIST_JS) or {}
+        episodes = data.get("episodes") or []
+        if not episodes:
+            return {
+                "ok": False,
+                "error": "NO_EPISODE_CONTEXT",
+                "message": ("На текущей странице не найдена очередь эпизодов/"
+                            "плейлист (ytInitialData.playlist пуст). Откройте "
+                            "видео из плейлиста или включите radio."),
+                "video_id": data.get("video_id"),
+                "list_id": data.get("list_id"),
+            }
+        return {
+            "ok": True,
+            "action": "episode_list",
+            "url": page.url,
+            "video_id": data.get("video_id"),
+            "list_id": data.get("list_id"),
+            "index": data.get("index"),
+            "count": len(episodes),
+            "episodes": episodes[:100],
+        }
+
+    async def _episode_step(self, params, delta: int) -> dict[str, Any]:
+        page = await self.require_page(params)
+        data = await page.evaluate(self._EPISODE_LIST_JS) or {}
+        episodes = data.get("episodes") or []
+        if not episodes:
+            return {
+                "ok": False,
+                "error": "NO_EPISODE_CONTEXT",
+                "message": ("Нет контекста episodes/playlist. Сначала "
+                            "episode_list или browser_get_context."),
+                "suggested_safe_actions": [
+                    {"tool": "browser_video", "args": {"action": "episode_list"}},
+                    {"tool": "browser_get_context"},
+                ],
+            }
+        cur = data.get("index")
+        if cur is None:
+            cur = 0
+        nxt = cur + delta
+        if nxt < 0 or nxt >= len(episodes):
+            return {
+                "ok": False,
+                "error": "EPISODE_OUT_OF_RANGE",
+                "message": "Эпизод %d вне очереди (0..%d)." % (nxt, len(episodes) - 1),
+                "index": cur,
+                "count": len(episodes),
+            }
+        target = episodes[nxt]
+        url = self._watch_url(target["video_id"], data.get("list_id"), nxt)
+        result = await self.cmd_navigate({"url": url})
+        verified = result.get("url", "") and target["video_id"] in result.get("url", "")
+        return {
+            **result,
+            "action": "episode_next" if delta > 0 else "episode_prev",
+            "from_index": cur,
+            "index": nxt,
+            "video_id": target["video_id"],
+            "list_id": data.get("list_id"),
+            "title": target.get("title", ""),
+            "verified": bool(verified),
+        }
+
+    async def cmd_episode_next(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._episode_step(params, +1)
+
+    async def cmd_episode_prev(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._episode_step(params, -1)
+
+    async def cmd_episode_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        data = await page.evaluate(self._EPISODE_LIST_JS) or {}
+        episodes = data.get("episodes") or []
+        if not episodes:
+            return {
+                "ok": False,
+                "error": "NO_EPISODE_CONTEXT",
+                "message": ("Нет контекста episodes/playlist. Сначала "
+                            "episode_list или browser_get_context."),
+            }
+        value = params.get("value")
+        target = None
+        try:
+            idx = int(value)
+            if 0 <= idx < len(episodes):
+                target = episodes[idx]
+        except (TypeError, ValueError):
+            pass
+        if target is None and isinstance(value, str):
+            for ep in episodes:
+                if ep.get("video_id") == value:
+                    target = ep
+                    break
+        if target is None:
+            return {
+                "ok": False,
+                "error": "EPISODE_NOT_FOUND",
+                "message": "Эпизод %r не найден в очереди (0..%d)." % (
+                    value, len(episodes) - 1),
+            }
+        url = self._watch_url(target["video_id"], data.get("list_id"),
+                              target["index"])
+        result = await self.cmd_navigate({"url": url})
+        return {
+            **result,
+            "action": "episode_open",
+            "index": target["index"],
+            "video_id": target["video_id"],
+            "list_id": data.get("list_id"),
+            "title": target.get("title", ""),
+            "verified": target["video_id"] in (result.get("url") or ""),
         }
 
     async def cmd_websocket_events(
