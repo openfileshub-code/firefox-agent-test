@@ -173,9 +173,6 @@ class BaseVideoAdapter:
         return await self._html5("volume_set", fraction)
 
     async def seek(self, seconds: float) -> dict[str, Any]:
-        return await self._html5("seek_to", seconds)
-
-    async def state(self) -> dict[str, Any]:
         """Базовое состояние + платформенные поля (режимы плеера).
 
         Системная правка №2: в state добавлены theater_mode/fullscreen —

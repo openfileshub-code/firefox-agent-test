@@ -46,8 +46,12 @@ def detect_page_type(url: str, dom_markers: Optional[dict] = None) -> str:
         return "blank"
     if any(h in host for h in YOUTUBE_HOSTS):
         qs = parse_qs(urlparse(u).query)
-        if qs.get("start_radio", [""])[0] == "1" or \
-                (qs.get("list", [""])[0].startswith("RD")):
+        # Radio-плейлист: явный start_radio=1 либо RD*-list. Список берётся
+        # из НЕНОРМАЛИЗОВАНного URL — префикс «RD» регистрозависимый, а u
+        # ниже по функции приведён к нижнему регистру.
+        raw_qs = parse_qs(urlparse(url or "").query)
+        if raw_qs.get("start_radio", [""])[0] == "1" or \
+                (raw_qs.get("list", [""])[0].startswith("RD")):
             return "radio"
         if "/results" in u or "search_query" in qs:
             return "search"
