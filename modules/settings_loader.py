@@ -144,6 +144,8 @@ class UserSettings:
     def site_forbidden_tools(self, hostname: str) -> set:
         forbidden = set()
         entry = self._site_entry(hostname)
+        # top-level список правил ТЗ (§sites.<host>.forbidden_tools)
+        forbidden.update(entry.get("forbidden_tools") or [])
         for it in (entry.get("intents") or {}).values():
             forbidden.update(it.get("forbidden_tools") or [])
         return forbidden

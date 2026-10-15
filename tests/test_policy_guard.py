@@ -251,8 +251,10 @@ class TestSettingsDriven:
 
     def test_site_forbidden_tools_block(self, tmp_path):
         loader = make_loader(tmp_path, {
-            "version": "1.0",
-            "sites": {"youtube.com": {"forbidden_tools": ["browser_screenshot"]}},
+            "version": "1.0", "global": {},
+            "sites": {"youtube.com": {
+                "intents": {"watch": {
+                    "forbidden_tools": ["browser_screenshot"]}}}},
         })
         cm = ContextManager(settings=loader.get())
         cm.update_from_result("browser_navigate", {}, {
