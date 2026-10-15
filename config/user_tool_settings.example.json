@@ -1,0 +1,150 @@
+{
+  "version": "1.0",
+  "global": {
+    "same_tab_by_default": true,
+    "allow_new_tab": false,
+    "allow_site_search": false,
+    "allow_scroll": false,
+    "forbid_placeholder_urls": true,
+    "prefer_native_video_controls": true,
+    "verify_after_mutation": true,
+    "max_retries": 2,
+    "relevance_threshold": 0.55,
+    "volume_tolerance": 0.005,
+    "theater_confidence_threshold": 0.75
+  },
+  "sites": {
+    "youtube.com": {
+      "aliases": [
+        "youtu.be",
+        "music.youtube.com"
+      ],
+      "intents": {
+        "open_item_on_current_page": {
+          "description": "Открыть элемент, который может находиться на текущей странице",
+          "trigger_examples": [
+            "открой {query}",
+            "найди на странице {query}",
+            "открой Тут {query}",
+            "открой имеющуюся ссылку {query}"
+          ],
+          "action": "search_on_current_page_and_click_best_relevant_link",
+          "allowed_tools": [
+            "browser_get_context",
+            "browser_find_link",
+            "browser_search_on_page",
+            "browser_expand_menu",
+            "browser_click_text",
+            "browser_click_selector"
+          ],
+          "forbidden_tools": [
+            "browser_new_tab",
+            "browser_navigate_to_search_url",
+            "browser_scroll"
+          ],
+          "selection_strategy": "best_relevant_visible_link",
+          "fallback": "report_not_found_without_site_search"
+        },
+        "set_theater_mode": {
+          "trigger_examples": [
+            "широкий экран",
+            "театральный режим",
+            "включи театральный режим",
+            "выключи театральный режим"
+          ],
+          "tool": "browser_video",
+          "action_map": {
+            "включить": "theater_set:true",
+            "выключить": "theater_set:false",
+            "переключить": "theater_toggle"
+          },
+          "forbidden": [
+            "browser_eval:fullscreen",
+            "browser_scroll",
+            "browser_search_on_page:theater",
+            "browser_navigate"
+          ],
+          "verify_fields": [
+            "layout.mode",
+            "layout.theater_mode",
+            "layout.confidence"
+          ]
+        },
+        "navigate_episodes": {
+          "trigger_examples": [
+            "следующий эпизод",
+            "предыдущий эпизод",
+            "открой эпизод {n}",
+            "перейди к следующему видео в плейлисте"
+          ],
+          "tool": "browser_video",
+          "actions": [
+            "episode_list",
+            "episode_next",
+            "episode_prev",
+            "episode_open"
+          ],
+          "forbid_site_search": true
+        }
+      }
+    }
+  },
+  "override_phrases": {
+    "allow_new_tab": [
+      "открой в новой вкладке",
+      "новая вкладка",
+      "open in new tab",
+      "new tab"
+    ],
+    "allow_site_search": [
+      "поищи на сайте",
+      "выполни поиск на сайте",
+      "перейди в поиск",
+      "найди через поиск сайта",
+      "search on site",
+      "site search"
+    ],
+    "allow_scroll": [
+      "прокрути вниз",
+      "прокрути вверх",
+      "скролль",
+      "листай",
+      "scroll down",
+      "scroll up"
+    ]
+  },
+  "policies": {
+    "same_tab_context": {
+      "enabled": true,
+      "block_tools_if_context_locked": [
+        "browser_new_tab",
+        "browser_navigate_to_search_url"
+      ]
+    },
+    "no_unrequested_scroll": {
+      "enabled": true,
+      "block_tool": "browser_scroll"
+    },
+    "no_placeholder_urls": {
+      "enabled": true,
+      "patterns": [
+        "...",
+        "{",
+        "}",
+        "VIDEO_ID",
+        "example",
+        "test",
+        "placeholder"
+      ]
+    },
+    "video_context_drift": {
+      "enabled": true,
+      "error_code": "VIDEO_CONTEXT_CHANGED"
+    }
+  },
+  "debug": {
+    "enabled": false,
+    "dump_dom_on_error": true,
+    "keep_error_screenshots": true
+  }
+}
