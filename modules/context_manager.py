@@ -63,8 +63,8 @@ def detect_page_type(url: str, dom_markers: Optional[dict] = None) -> str:
             return "channel"
         if dom.get("on_watch"):
             return "watch"
-        if u.rstrip("/") in ("https://youtube.com", "https://www.youtube.com",
-                             "https://m.youtube.com"):
+        path = urlparse(u).path.rstrip("/") or "/"
+        if path in ("", "/") and not qs.get("vl"):
             return "home"
         return "other"
     if dom.get("on_watch"):
@@ -114,6 +114,9 @@ class BrowserContext:
     title: str = ""
     has_episode_queue: bool = False
     history: list = field(default_factory=list)  # последние (tool, sig, ok)
+    #: маркер «элемент скрыт» для POLICY_HIDDEN_ELEMENT_REQUIRES_EXPAND
+    pending_hidden_element: str = ""
+    expanded_since_hidden: bool = False
 
     # ------------------------------------------------------------------
     @property
@@ -215,21 +218,28 @@ class ContextManager:
             if isinstance(v, str) and VIDEO_ID_RE.match(v):
                 ctx.video_id = v
         state = result.get("state")
-        if isinstance(state, dict):
-            v = state.get("video_id")
-            if isinstance(v, str) and VIDEO_ID_RE.match(v):
-                ctx.video_id = v
-            if "theater_mode" in state or "layout" in state:
-                lay = state.get("layout") or {}
-                ctx.layout = {
-                    "mode": lay.get("mode") or state.get("layout_mode")
-                             or ("theater" if state.get("theater_mode") else
-                                 "unknown"),
-                    "theater_mode": state.get("theater_mode"),
-                    "fullscreen": state.get("fullscreen"),
-                    "confidence": lay.get("confidence"),
-                    "evidence": lay.get("evidence", []),
-                }
+        if not isinstance(state, dict):
+            state = {}
+        v = state.get("video_id") or result.get("video_id")
+        if isinstance(v, str) and VIDEO_ID_RE.match(v):
+            ctx.video_id = v
+        lay = result.get("layout") or state.get("layout") or {}
+        if isinstance(lay, dict) and lay:
+            ctx.layout = {
+                "mode": lay.get("mode") or state.get("layout_mode") or "unknown",
+                "theater_mode": lay.get("theater_mode",
+                                        state.get("theater_mode")),
+                "fullscreen": lay.get("fullscreen", state.get("fullscreen")),
+                "confidence": lay.get("confidence"),
+                "evidence": lay.get("evidence", []),
+            }
+        elif "theater_mode" in state:
+            ctx.layout = {
+                "mode": ("theater" if state.get("theater_mode") else "default"),
+                "theater_mode": state.get("theater_mode"),
+                "fullscreen": state.get("fullscreen"),
+                "confidence": None, "evidence": ["legacy_state_class"],
+            }
         title = result.get("title")
         if isinstance(title, str) and title and tool != "browser_tabs":
             ctx.title = title[:240]
@@ -265,6 +275,21 @@ class ContextManager:
         if sig:
             ctx.history.append((tool, sig, ok))
             ctx.history = ctx.history[-20:]
+
+        # маркер «скрытого элемента»: клик завершился ошибкой visibility —
+        # повторный клик по тому же тексту без browser_expand_menu запрещён
+        err_text = str(result.get("error") or result.get("message") or "")
+        if tool in ("browser_click_text", "browser_click_selector") and not ok:
+            if any(m in err_text.lower() for m in
+                   ("hidden", "скрыт", "not visible", "visible")):
+                ctx.pending_hidden_element = str(args.get("text")
+                                                 or args.get("selector") or "")
+                ctx.expanded_since_hidden = False
+        if tool == "browser_expand_menu" and ok:
+            ctx.expanded_since_hidden = True
+        if tool in ("browser_click_text", "browser_click_selector") and ok:
+            ctx.pending_hidden_element = ""
+            ctx.expanded_since_hidden = False
 
         ctx.apply_settings(self._settings)
         return ctx

@@ -329,14 +329,10 @@ class PolicyGuard:
                               "args": {"action": "theater_set",
                                        "value": True}}])
         # повторный клик после «скрыт» без expand между попытками
-        hidden_failed = any(
-            t == tool and "hidden" in str(r).lower() or
-            t == tool and "скрыт" in str(r)
-            for t, r in getattr(ctx, "last_hidden_errors", [])
-        ) if hasattr(ctx, "last_hidden_errors") else False
-        if getattr(ctx, "pending_hidden_element", "") and \
-                str(args.get("text") or "") == getattr(
-                    ctx, "pending_hidden_element", ""):
+        if getattr(ctx, "pending_hidden_element", "") and not getattr(
+                ctx, "expanded_since_hidden", False) and \
+                str(args.get("text") or args.get("selector") or "") == \
+                getattr(ctx, "pending_hidden_element", ""):
             expanded = getattr(ctx, "expanded_since_hidden", False)
             if not expanded:
                 return _deny(
