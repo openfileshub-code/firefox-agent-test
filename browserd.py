@@ -1767,6 +1767,21 @@ class BrowserController:
 
         action = self._VIDEO_ACTION_ALIASES.get(action, action)
 
+        # Действия episodes/playlist обрабатываются на уровне демона
+        # (ТЗ этап 9): они работают с ytInitialData и навигацией, а не
+        # через платформенный адаптер плеера.
+        if action in self._EPISODE_ACTIONS:
+            ep_params = dict(params)
+            ep_params["value"] = value
+            if action == "episode_list":
+                return await self.cmd_episode_list(ep_params)
+            if action == "episode_next":
+                return await self.cmd_episode_next(ep_params)
+            if action == "episode_prev":
+                return await self.cmd_episode_prev(ep_params)
+            if action == "episode_open":
+                return await self.cmd_episode_open(ep_params)
+
         # Системная правка №7: «сброс громкости» — это YouTube-фича
         # (после v/volume_up/volume_down плеер возвращает сохранённую
         # пользователем громкость), а не HTML5-поведение. Прямое
