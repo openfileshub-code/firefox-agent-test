@@ -2060,6 +2060,160 @@ class BrowserController:
             "verified": target["video_id"] in (result.get("url") or ""),
         }
 
+    # ------------------------------------------------------------------
+    # Главы (chapters) — ТЗ этап 9: chapter_list / chapter_seek
+    # Источник: ytInitialPlayerResponse.playerDescriptors.chapteredActions
+    # (основной) и ссылки вида «MM:SS Название» в описании (fallback).
+    # ------------------------------------------------------------------
+    _CHAPTER_LIST_JS = r"""
+    () => {
+      const out = {chapters: [], video_id: null, source: null};
+      try {
+        const pr = window.ytInitialPlayerResponse;
+        if (pr && pr.videoDetails) out.video_id = pr.videoDetails.videoId || null;
+        const ds = (((pr || {}).playerDescriptors || [])[0] || {})
+                     .chapteredActions;
+        const watch = (ds || {}).watchNextChapterDescriptor;
+        if (watch && Array.isArray(watch.chapters)) {
+          out.source = 'ytInitialPlayerResponse';
+          watch.chapters.forEach((c, i) => {
+            let title = '';
+            try {
+              title = ((c.title || {}).simpleText) ||
+                      (((c.title || {}).runs || [])[0] || {}).text || '';
+            } catch (e) {}
+            out.chapters.push({index: i, title: title,
+                               start_seconds: c.time || 0});
+          });
+        }
+      } catch (e) {}
+      if (!out.chapters.length) {
+        // fallback: таймкоды в описании (#chapter или «0:00 Title»)
+        try {
+          const spans = document.querySelectorAll(
+            '#description a.yt-simple-endpoint, #structured-description a');
+          const seen = {};
+          spans.forEach(a => {
+            const t = (a.textContent || '').trim();
+            const m = t.match(/^(\d+):([0-5]\d)(?::([0-5]\d))?\s+(.+)$/);
+            if (!m) return;
+            const secs = m[3] !== undefined
+              ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])
+              : (+m[1]) * 60 + (+m[2]);
+            const title = m[4].trim();
+            const key = secs + '|' + title;
+            if (seen[key]) return;
+            seen[key] = true;
+            out.chapters.push({index: out.chapters.length,
+                               title: title, start_seconds: secs});
+          });
+          if (out.chapters.length) out.source = 'description-timestamps';
+        } catch (e) {}
+      }
+      return out;
+    }
+    """
+
+    async def cmd_chapter_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        data = await page.evaluate(self._CHAPTER_LIST_JS) or {}
+        chapters = data.get("chapters") or []
+        if not chapters:
+            return {
+                "ok": False,
+                "error": "NO_CHAPTER_CONTEXT",
+                "message": ("На текущем видео главы не найдены "
+                            "(ни playerDescriptors, ни таймкоды в описании)."),
+                "video_id": data.get("video_id"),
+                "suggested_safe_actions": [
+                    {"tool": "browser_get_content"},
+                    {"tool": "browser_video", "args": {"action": "seek"}},
+                ],
+            }
+        return {
+            "ok": True,
+            "action": "chapter_list",
+            "url": page.url,
+            "video_id": data.get("video_id"),
+            "source": data.get("source"),
+            "count": len(chapters),
+            "chapters": chapters[:200],
+        }
+
+    async def cmd_chapter_seek(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        data = await page.evaluate(self._CHAPTER_LIST_JS) or {}
+        chapters = data.get("chapters") or []
+        if not chapters:
+            return {
+                "ok": False,
+                "error": "NO_CHAPTER_CONTEXT",
+                "message": ("Главы не найдены — используйте seek с "
+                            "явным временем в секундах."),
+                "suggested_safe_actions": [
+                    {"tool": "browser_video",
+                     "args": {"action": "seek", "value": 60}},
+                    {"tool": "browser_video",
+                     "args": {"action": "chapter_list"}},
+                ],
+            }
+        value = params.get("value")
+        if value is None:
+            value = params.get("target")
+        target = None
+        # 1) индекс главы (int или int-строка)
+        try:
+            idx = int(value)
+            if 0 <= idx < len(chapters):
+                target = chapters[idx]
+        except (TypeError, ValueError):
+            target = None
+        # 2) точное совпадение заголовка
+        if target is None and isinstance(value, str):
+            low = value.strip().lower()
+            for ch in chapters:
+                if ch.get("title", "").strip().lower() == low:
+                    target = ch
+                    break
+        # 3) fuzzy по заголовку
+        if target is None and isinstance(value, str) and value.strip():
+            low = value.strip().lower()
+            best = None
+            for ch in chapters:
+                t = ch.get("title", "").strip().lower()
+                if low in t or t in low:
+                    best = ch
+                    break
+            target = best
+        # 4) время в секундах
+        if target is None:
+            try:
+                secs = float(value)
+                target = {"index": None, "title": "",
+                          "start_seconds": secs, "synthetic_time": True}
+            except (TypeError, ValueError):
+                target = None
+        if target is None:
+            return {
+                "ok": False,
+                "error": "CHAPTER_NOT_FOUND",
+                "message": "Глава %r не найдена (0..%d)." % (
+                    value, len(chapters) - 1),
+                "chapters": [c.get("title") for c in chapters[:50]],
+            }
+        seek_result = await self.cmd_video_action(
+            {"action": "seek", "value": target["start_seconds"]})
+        return {
+            **(seek_result if isinstance(seek_result, dict) else
+               {"ok": bool(seek_result), "result": seek_result}),
+            "action": "chapter_seek",
+            "chapter_index": target.get("index"),
+            "chapter_title": target.get("title", ""),
+            "start_seconds": target["start_seconds"],
+            "video_id": data.get("video_id"),
+            "chapter_source": data.get("source"),
+        }
+
     async def cmd_websocket_events(
         self,
         params: dict[str, Any],

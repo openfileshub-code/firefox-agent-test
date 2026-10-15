@@ -52,4 +52,4 @@
 - Факт: `r3TzbOP7-YA` → `J3eqAxYPkmA`, команды применены к чужому видео.
 - Ожидание: до mutation зафиксировать `expected_video_id`; после — сравнить; расхождение → `VIDEO_CONTEXT_CHANGED`, команда не применяется, предлагается `episode_open(video_id=expected)`.
 
-Все кейсы закреплены в `tests/test_regression_chat_cases.py` (Этап 13).
+Все кейсы закреплены в `tests/test_regression_chat_cases.py` (Этап 13) — файл существует, все RC покрыты тестами (guard/middleware-уровень); действия chapter_* дополнительно покрыты `tests/test_chapters.py`.

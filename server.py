@@ -661,7 +661,17 @@ async def browser_video(
     set_quality ('480p', '1080p60', 'Auto'... — через UI-автоматизацию,
     без устаревшего IFrame API), toggle_theater_mode (алиасы:
     theater_toggle, toggle_theater, theater_mode, theater, set_theater),
-    next_video, toggle_chat_visibility, fullscreen_enter, detect_login.
+    theater_set (value/target: true|false — идемпотентно, changed:false
+    при уже нужном режиме), layout_state (мультиканальный снимок режима
+    с confidence/evidence),
+    episode_list / episode_next / episode_prev / episode_open (нативная
+    навигация по плейлисту через ytInitialData; value для episode_open —
+    index или video_id), chapter_list / chapter_seek (главы описания;
+    value для chapter_seek — индекс главы или время в секундах),
+    next_video, toggle_chat_visibility, detect_login.
+    Действие state возвращает video_id/list_id/is_radio (RC11).
+    requestFullscreen через browser_eval заблокирован — для «широкого
+    экрана» используйте theater_set/toggle_theater_mode.
 
     Поле value для volume принимает доли 0..1 либо проценты 0..100
     (авто-нормализация). Действие 'state' возвращает расширенный статус:

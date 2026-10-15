@@ -82,7 +82,9 @@
             "episode_list",
             "episode_next",
             "episode_prev",
-            "episode_open"
+            "episode_open",
+            "chapter_list",
+            "chapter_seek"
           ],
           "forbid_site_search": true
         }
