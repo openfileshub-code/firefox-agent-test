@@ -14,6 +14,19 @@ from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP
 
+# Интеграция модулей политики (ТЗ этапы 2-5): guard/настройки/контекст
+# подключаются к каждому tool call через middleware call().
+import sys as _sys
+if str(Path(__file__).resolve().parent) not in _sys.path:
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from modules.context_manager import ContextManager          # noqa: E402
+from modules.policy_guard import PolicyGuard                # noqa: E402
+from modules.settings_loader import (                        # noqa: E402
+    SettingsLoader, init_global_loader,
+)
+from modules import url_validator as uv                      # noqa: E402
+
 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "playwright_profile"
@@ -76,6 +89,18 @@ def _make_logger():
 log = _make_logger()
 
 
+# ---------------------------------------------------------------------------
+# Синглтоны политики (ТЗ этап 10): единый источник настроек/контекста/guard'а
+# на процесс MCP-сервера.
+# ---------------------------------------------------------------------------
+SETTINGS_LOADER = SettingsLoader(explicit_path=os.environ.get("BROWSERD_SETTINGS"))
+SETTINGS_LOADER.load()
+init_global_loader(SETTINGS_LOADER)
+
+CONTEXT_MANAGER = ContextManager(settings=SETTINGS_LOADER.get())
+POLICY_GUARD = PolicyGuard(SETTINGS_LOADER, CONTEXT_MANAGER)
+
+
 def validate_url(value: str) -> Optional[str]:
     value = (value or "").strip()
     if not value or any(ch.isspace() for ch in value):
@@ -92,12 +117,28 @@ def validate_url(value: str) -> Optional[str]:
         "<", ">", "{", "}", "[your", "placeholder", "site.tld", "..."
     )):
         return "URL выглядит как пример или плейсхолдер"
+    # Модульный валидатор (ТЗ этап 5): placeholder-URL и невалидные video_id.
+    # Site-search URL здесь НЕ блокируем: это ответственность PolicyGuard,
+    # который учитывает override_phrase/allow_site_search из настроек.
+    result = uv.validate_navigation_url(
+        value,
+        context=CONTEXT_MANAGER.get_active_context(),
+        settings=SETTINGS_LOADER.get(),
+        allow_search_override=True,
+    )
+    if not result.valid:
+        return "%s: %s" % (result.error_code or "POLICY_URL_REJECTED",
+                           result.message)
     return None
 
 
 VIDEO_JS_RE = re.compile(
     r"\.(play|pause|currentTime\s*=|volume\s*=|muted\s*=|load\s*$)"
-    r"|querySelector(?:All)?\s*$\s*['\"]video",
+    r"|querySelector(?:All)?\s*\(\s*['\"]video"
+    # RC6: fullscreen-API для «широкого экрана» — ровно тот вызов,
+    # которым агент ломал theater-режим.
+    r"|requestFullscreen|webkitRequestFullScreen|webkitRequestFullscreen"
+    r"|exitFullscreen|fullscreenElement|fullscreen",
     re.IGNORECASE,
 )
 
@@ -306,8 +347,66 @@ async def lifespan(_server):
 mcp = FastMCP("camoufox-browserd", lifespan=lifespan)
 
 
-async def call(command: str, params: Optional[dict] = None):
-    return await connector.send(command, params)
+#: соответствие MCP tool -> команда демона (для enrich/маршрутизации)
+_COMMAND_TO_TOOL = {
+    "navigate": "browser_navigate",
+    "new_tab": "browser_new_tab",
+    "scroll": "browser_scroll",
+    "eval": "browser_eval",
+    "click_text": "browser_click_text",
+    "click_selector": "browser_click_selector",
+    "search_on_page": "browser_search_on_page",
+    "video_action": "browser_video",
+    "expand_menu": "browser_expand_menu",
+    "context_get": "browser_get_context",
+}
+
+#: команды, чьи ответы наполняют BrowserContext
+_CONTEXT_COMMANDS = {
+    "navigate", "new_tab", "switch_tab", "tabs", "video_action",
+    "context_get", "episode_next", "episode_prev", "episode_open",
+    "episode_list", "click_text", "click_selector", "expand_menu",
+}
+
+
+async def call(command: str, params: Optional[dict] = None, *,
+               tool: Optional[str] = None,
+               guard_args: Optional[dict] = None) -> dict:
+    """Единая точка исполнения команд демона (middleware, ТЗ этап 10).
+
+    1. SettingsLoader hot-reload (mtime) перед каждой проверкой.
+    2. PolicyGuard.check() — отказ возвращается как структурированный
+       объект (error_code / rule_source / suggested_safe_actions), а не
+       исключение, чтобы агент видел безопасные альтернативы.
+    3. Исполнение команды демона.
+    4. ContextManager.update_from_result() — наполнение контекста
+       (video_id/list_id/layout/history) из ответа.
+    """
+    SETTINGS_LOADER.reload_if_changed()
+    tool_name = tool or _COMMAND_TO_TOOL.get(command, command)
+    check_args = dict(guard_args if guard_args is not None else (params or {}))
+
+    decision = POLICY_GUARD.check(tool_name, check_args)
+    if not decision.allowed:
+        log.info("PolicyGuard deny: %s %s (%s)",
+                 tool_name, decision.error_code, decision.rule_source)
+        result = {"ok": False, **decision.to_dict()}
+        CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+        return result
+
+    # слепой повтор mutate-действия для всех инструментов (не только video)
+    retry = POLICY_GUARD.check_blind_retry(tool_name, check_args)
+    if not retry.allowed:
+        log.info("PolicyGuard deny (blind retry): %s", tool_name)
+        result = {"ok": False, **retry.to_dict()}
+        CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+        return result
+
+    result = await connector.send(command, params)
+
+    if command in _CONTEXT_COMMANDS and isinstance(result, dict):
+        CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+    return result
 
 
 @mcp.tool()
@@ -332,13 +431,27 @@ async def browser_stop() -> dict:
 
 
 @mcp.tool()
-async def browser_navigate(url: str, new_tab: bool = False) -> dict:
+async def browser_navigate(
+    url: str, new_tab: bool = False, override_phrase: str = ""
+) -> dict:
+    """Перейти по URL.
+
+    Args:
+        url: полноценный http(s) URL (placeholder-URL запрещены).
+        new_tab: открыть в новой вкладке (требует override_phrase с
+            явным запросом пользователя — см. user_tool_settings.json).
+        override_phrase: дословная фраза пользователя-оператора,
+            разрешающая исключение из политики («открой в новой
+            вкладке», «ищи на сайте», «прокрути страницу»).
+    """
     error = validate_url(url)
     if error:
         raise ValueError(error)
     if new_tab:
-        return await call("new_tab", {"url": url})
-    return await call("navigate", {"url": url})
+        return await call("new_tab", {"url": url}, guard_args={
+            "url": url, "new_tab": True, "override_phrase": override_phrase})
+    return await call("navigate", {"url": url}, guard_args={
+        "url": url, "override_phrase": override_phrase})
 
 
 @mcp.tool()
@@ -369,6 +482,7 @@ async def browser_click_text(
     text: str = "",
     index: int = 0,
     selector: str = "",
+    override_phrase: str = "",
 ) -> dict:
     """Клик по тексту элемента ИЛИ по CSS-селектору.
 
@@ -382,7 +496,11 @@ async def browser_click_text(
     if not str(text).strip() and not str(selector).strip():
         raise ValueError("Укажите хотя бы одно: text или selector")
     return await call("click_text", {
-        "text": text, "index": index, "selector": selector
+        "text": text, "index": index, "selector": selector,
+        "override_phrase": override_phrase,
+    }, guard_args={
+        "text": text, "index": index, "selector": selector,
+        "override_phrase": override_phrase,
     })
 
 
@@ -400,8 +518,25 @@ async def browser_press_key(key: str) -> dict:
 
 
 @mcp.tool()
-async def browser_scroll(direction: str = "down", amount: int = 800) -> dict:
-    return await call("scroll", {"direction": direction, "amount": amount})
+async def browser_scroll(
+    direction: str = "down", amount: int = 800, override_phrase: str = ""
+) -> dict:
+    """Прокрутить страницу. Без явного запроса пользователя блокируется
+    политикой (POLICY_SCROLL_NOT_REQUESTED): для скрытых элементов
+    используйте browser_expand_menu.
+
+    Args:
+        direction: up/down/left/right.
+        amount: пикселей.
+        override_phrase: дословная фраза пользователя, разрешающая скролл
+            (whitelist allow_scroll из user_tool_settings.json).
+    """
+    return await call("scroll", {
+        "direction": direction, "amount": amount,
+    }, guard_args={
+        "direction": direction, "amount": amount,
+        "override_phrase": override_phrase,
+    })
 
 
 @mcp.tool()
@@ -437,12 +572,21 @@ async def browser_get_content(
 
 
 @mcp.tool()
-async def browser_new_tab(url: str = "") -> dict:
+async def browser_new_tab(url: str = "", override_phrase: str = "") -> dict:
+    """Открыть новую вкладку. Запрещено политикой одной вкладки, если
+    пользователь явно не разрежил это фразой из whitelist allow_new_tab.
+
+    Args:
+        url: необязательный URL для перехода в новой вкладке.
+        override_phrase: дословная фраза пользователя («открой в новой
+            вкладке» и т.п. из whitelist настроек).
+    """
     if url:
         error = validate_url(url)
         if error:
             raise ValueError(error)
-    return await call("new_tab", {"url": url})
+    return await call("new_tab", {"url": url}, guard_args={
+        "url": url, "override_phrase": override_phrase})
 
 
 @mcp.tool()
@@ -465,7 +609,12 @@ async def browser_tabs() -> dict:
 
 @mcp.tool()
 async def browser_video(
-    action: str, value: Optional[float] = None
+    action: str,
+    value: Any = None,
+    target: Any = None,
+    expected_video_id: str = "",
+    verify: Optional[bool] = None,
+    override_phrase: str = "",
 ) -> dict:
     """Управление видеоплеером через систему адаптеров платформ.
 
@@ -487,9 +636,36 @@ async def browser_video(
     каналов: aria/text-кнопка -> CSS .ytp-size-button -> горячая клавиша
     't' -> JS click(), с верификацией смены класса после каждого канала.
 
+    Args:
+        action: действие над плеером (см. список выше).
+        value: числовой/строковый аргумент (громкость, quality label,
+            True/False для theater_set, video_id/index для episode_open).
+        target: синоним value для theater_set(true/false) и episode_open.
+        expected_video_id: ожидаемое видео; при расхождении с фактическим
+            (radio autoplay) действие блокируется VIDEO_CONTEXT_CHANGED.
+        verify: запрос пост-верификации мутации; при глобальном
+            verify_after_mutation=true отключить нельзя (VERIFY_REQUIRED).
+        override_phrase: фраза пользователя, разрешающая исключение.
+
     Результат содержит поля 'adapter' и 'platform'.
     """
-    return await call("video_action", {"action": action, "value": value})
+    params: Dict[str, Any] = {"action": action}
+    if value is not None:
+        params["value"] = value
+    if target is not None:
+        params["target"] = target
+    if expected_video_id:
+        params["expected_video_id"] = expected_video_id
+    if verify is not None:
+        params["verify"] = verify
+    guard_args = {
+        "action": action,
+        "value": value if value is not None else target,
+        "expected_video_id": expected_video_id or None,
+        "verify": verify,
+        "override_phrase": override_phrase,
+    }
+    return await call("video_action", params, guard_args=guard_args)
 
 
 @mcp.tool()
@@ -532,6 +708,89 @@ async def browser_search_on_page(
 @mcp.tool()
 async def browser_find_link(pattern: str = "") -> dict:
     return await call("find_link", {"pattern": pattern})
+
+
+@mcp.tool()
+async def browser_get_context(tab_index: int = -1) -> dict:
+    """Снимок активного контекста: url/title/tab_id + video_id/list_id/
+    index/is_radio (URL + ytInitialData), layout плеера (theater/fullscreen
+    с confidence/evidence), has_episode_queue, same_tab_required,
+    expected_video_id.
+
+    Использовать перед video-mutaction действиями и после любого
+    подозрения на смену видео (radio autoplay, RC11).
+    """
+    result = await call("context_get", {"index": tab_index})
+    ctx = CONTEXT_MANAGER.get_active_context()
+    check = CONTEXT_MANAGER.check_video_context(ctx.video_id)
+    out = dict(result) if isinstance(result, dict) else {"ok": False,
+                                                         "error": str(result)}
+    out["context"] = ctx.to_public_dict()
+    out["video_context_check"] = check.to_dict()
+    return out
+
+
+@mcp.tool()
+async def browser_validate_url(url: str) -> dict:
+    """Проверить URL против политики без перехода: placeholder-маркеры,
+    search-results URL, валидность youtube video_id, canonical watch URL.
+
+    Полезен для RC4/RC5: извлеките реальный video_id со страницы
+    (browser_find_link) и проверьте его здесь до навигации.
+    """
+    result = uv.validate_navigation_url(
+        url,
+        context=CONTEXT_MANAGER.get_active_context(),
+        settings=SETTINGS_LOADER.get(),
+    )
+    out = result.to_dict()
+    if not out.get("valid"):
+        out["rule_source"] = result.rule_source
+    return out
+
+
+@mcp.tool()
+async def browser_reload_settings(path: str = "") -> dict:
+    """Перезагрузить user_tool_settings.json (hot-reload).
+
+    Без path — проверка mtime выбранного файла (обычно достаточно:
+    middleware делает это перед каждым вызовом). С path — явная
+    загрузка конкретного файла с валидацией по схеме; невалидные
+    настройки откатываются к safe defaults (SETTINGS_INVALID_FALLBACK).
+    """
+    if path:
+        loader = SettingsLoader(explicit_path=path)
+        loaded = loader.load()
+        if loaded.source != "file":
+            return {
+                "ok": False,
+                "error_code": "SETTINGS_INVALID_FALLBACK",
+                "reason": "; ".join(loaded.warnings) or "невалидные настройки",
+                "active_path": SETTINGS_LOADER.active_path,
+            }
+        # атомарная замена состояния существующего синглтона —
+        # PolicyGuard/адаптеры продолжают видеть тот же объект
+        SETTINGS_LOADER.__dict__.update(loader.__dict__)
+        init_global_loader(SETTINGS_LOADER)
+        CONTEXT_MANAGER.set_settings(SETTINGS_LOADER.get())
+        s = SETTINGS_LOADER.get()
+        return {
+            "ok": True,
+            "reloaded": True,
+            "active_path": SETTINGS_LOADER.active_path,
+            "settings_hash": s.hash,
+            "warnings": s.warnings,
+            "global": s.global_rules,
+        }
+    changed = SETTINGS_LOADER.reload_if_changed()
+    s = SETTINGS_LOADER.get()
+    CONTEXT_MANAGER.set_settings(s)
+    return {
+        "ok": True,
+        "changed": changed,
+        "active_path": SETTINGS_LOADER.active_path,
+        "settings_hash": s.hash,
+    }
 
 
 if __name__ == "__main__":
