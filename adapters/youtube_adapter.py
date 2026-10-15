@@ -441,6 +441,58 @@ class YoutubeAdapter(BaseVideoAdapter):
         }
         return modes
 
+    async def state(self) -> dict[str, Any]:
+        """Базовое состояние + видеоидентификаторы страницы (RC11).
+
+        В state добавляются ``video_id`` (реальный из плеера, не из URL),
+        ``list_id``, ``is_radio`` — без них ContextManager не может ни
+        наполнить ``expected_video_id``, ни детектировать radio-drift.
+        """
+        result = await super().state()
+        if not isinstance(result, dict):
+            return result
+        try:
+            ids = await self.page.evaluate(r"""
+            () => {
+              const out = {};
+              try {
+                const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+                if (m) out.url_video_id = m[1];
+                const lm = location.href.match(/[?&]list=([A-Za-z0-9_-]+)/);
+                if (lm) out.list_id = lm[1];
+                if (/[?&]start_radio=1/.test(location.href)) out.is_radio = true;
+                const mp = document.querySelector('#movie_player');
+                if (mp && typeof mp.getVideoData === 'function') {
+                  const vd = mp.getVideoData() || {};
+                  if (vd.video_id) out.video_id = vd.video_id;
+                }
+                const d = window.ytInitialData;
+                if (d && out.list_id == null) {
+                  const pl = (((d.contents || {}).twoColumnWatchNextResults || {})
+                    .playlist || {}).playlist || {};
+                  if (pl.listId) out.list_id = pl.listId;
+                }
+                if (/^RD/.test(out.list_id || '')) out.is_radio = true;
+              } catch (e) {}
+              return out;
+            }
+            """) or {}
+        except Exception:  # noqa: BLE001
+            ids = {}
+        state = result.setdefault("state", {})
+        if not isinstance(state, dict):
+            state = result
+        vid = ids.get("video_id") or ids.get("url_video_id")
+        if vid:
+            result["video_id"] = vid
+            state.setdefault("video_id", vid)
+        if ids.get("list_id"):
+            result["list_id"] = ids["list_id"]
+        if ids.get("is_radio"):
+            result["is_radio"] = True
+            state.setdefault("is_radio", True)
+        return result
+
     async def layout_state(self) -> dict[str, Any]:
         """Мультиканальный снимок layout с confidence/evidence (RC10)."""
         modes = await self.get_player_modes()
