@@ -395,6 +395,8 @@ async def call(command: str, params: Optional[dict] = None, *,
                  tool_name, decision.error_code, decision.rule_source)
         result = {"ok": False, **decision.to_dict()}
         CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+        AUDIT.record(tool_name, check_args, decision=decision.to_dict(),
+                     result=result, context=CONTEXT_MANAGER.get_active_context().to_public_dict())
         return result
 
     # слепой повтор mutate-действия для всех инструментов (не только video)
@@ -403,12 +405,44 @@ async def call(command: str, params: Optional[dict] = None, *,
         log.info("PolicyGuard deny (blind retry): %s", tool_name)
         result = {"ok": False, **retry.to_dict()}
         CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+        AUDIT.record(tool_name, check_args, decision=retry.to_dict(),
+                     result=result, context=CONTEXT_MANAGER.get_active_context().to_public_dict())
         return result
 
     result = await connector.send(command, params)
 
-    if command in _CONTEXT_COMMANDS and isinstance(result, dict):
-        CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+    if isinstance(result, dict):
+        # Этап 7 ТЗ: state_verifier — пост-проверка mutate-действий с verify=true.
+        # Ожидания берутся из параметров; данные — из ответа адаптера. Если
+        # данных для проверки нет — passed=True (нет false-negative).
+        if (tool_name == "browser_video" and check_args.get("verify")
+                and result.get("ok", True)):
+            from modules.state_verifier import verify_video_action_result
+            vaction = str(check_args.get("action") or "")
+            merged = dict(result)
+            # ожидания из параметров tool call'а — адаптер о них не знает
+            if vaction in ("theater_set", "set_theater"):
+                val = check_args.get("value", check_args.get("target"))
+                if isinstance(val, str):
+                    val = val.strip().lower() in ("true", "1", "on",
+                                                  "включить", "вкл")
+                if isinstance(val, bool):
+                    merged["target"] = val
+            if check_args.get("expected_video_id"):
+                merged["expected_video_id"] = check_args["expected_video_id"]
+            vres = verify_video_action_result(vaction, merged,
+                                              settings=SETTINGS_LOADER)
+            if not vres.passed:
+                result = {"ok": False, **result, **vres.to_dict()}
+        # guard/verifier-отказы не должны выглядеть как успешный ответ
+        # демона (иначе агент увидит ok:true вместе с error_code)
+        elif result.get("error_code") and result.get("ok", True):
+            result = {**result, "ok": False}
+        if command in _CONTEXT_COMMANDS:
+            CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+    AUDIT.record(tool_name, check_args, decision=decision.to_dict(),
+                 result=result if isinstance(result, dict) else {"ok": True},
+                 context=CONTEXT_MANAGER.get_active_context().to_public_dict())
     return result
 
 

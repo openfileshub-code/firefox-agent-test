@@ -381,6 +381,11 @@ class BaseVideoAdapter:
             "set_quality": lambda: self.set_quality(str(value or "")),
             "toggle_theater_mode": lambda: self.toggle_theater_mode(),
             "theater": lambda: self.toggle_theater_mode(),
+            # идемпотентный theater_set и снимок layout (ТЗ этап 8, RC7/RC10);
+            # платформенные адаптеры переопределяют set_theater_mode,
+            # базовый — возвращает _unsupported
+            "theater_set": lambda: self.set_theater_mode(value),
+            "layout_state": lambda: self.layout_state(),
             "next_video": lambda: self.next_video(),
             "toggle_chat_visibility": lambda: self.toggle_chat_visibility(),
             "fullscreen_enter": lambda: self.fullscreen_enter(),

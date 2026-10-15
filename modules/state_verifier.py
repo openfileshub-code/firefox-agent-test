@@ -133,7 +133,11 @@ def verify_video_action_result(action: str, result: dict,
     passed=True с пустым checked_fields (нет false-negative на старых
     адаптерах).
     """
-    g = settings.g if settings is not None else (lambda k: None)
+    try:
+        s = settings.get() if hasattr(settings, "get") else settings
+        g = s.g if s is not None else (lambda k: None)
+    except Exception:  # noqa: BLE001 — верификатор не должен ронять tool call
+        g = (lambda k: None)
     tol = g("volume_tolerance") or 0.005
     snap = {
         "state": result.get("state") or {},
