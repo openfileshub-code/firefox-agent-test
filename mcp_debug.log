@@ -4,3 +4,4 @@
 2026-10-15 14:25:05,939 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
 2026-10-15 14:25:46,132 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
 2026-10-15 14:26:25,386 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
+2026-10-15 14:27:06,490 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
