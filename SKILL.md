@@ -70,8 +70,8 @@ description: Практичный порядок работы агента с Fi
 | `browser_get_content(max_chars=8000, mode="text")` | Получить текст или HTML страницы. Используй для проверки содержимого, а не автоматически после каждого действия. |
 | `browser_screenshot(full_page=False)` | Сделать снимок страницы, если он нужен для задачи или если текстовых данных недостаточно. |
 | `browser_search_on_page(pattern, regex=False)` | Найти текст на текущей странице. Это **не** поисковая строка сайта и не интернет-поиск. |
-| `browser_find_link(pattern="")` | Найти ссылки и интерактивные элементы на текущей странице по примерному текстовому совпадению. |
-| `browser_video(action, value=None)` | Выполнить поддерживаемое действие с HTML5-видео и получить результат. Принимает также `target`, `expected_video_id`, `verify`, `override_phrase`. |
+| `browser_find_link(pattern="")` | Найти ссылки и интерактивные элементы на текущей странице по примерному текстовому совпадению. Возвращает ранжированных `candidates` (`candidate_id/text/href/video_id/score`); при низком confidence — `NO_CONFIDENT_MATCH_ON_CURRENT_PAGE`. |
+| `browser_video(action, value=None)` | Выполнить поддерживаемое действие с HTML5-видео и получить результат. Принимает также `target`, `expected_video_id`, `verify`, `override_phrase`. Полный список действий — в разделе «Видео» ниже. |
 | `browser_expand_menu(trigger_text)` | Раскрыть меню/бургер перед кликом по скрытому элементу. Обязательный шаг вместо прокрутки или слепого повтора клика. |
 | `browser_go_back` / `browser_history_back` | Нативная кнопка «Назад» браузера. |
 | `browser_go_forward` | Нативная кнопка «Вперёд» браузера. |
