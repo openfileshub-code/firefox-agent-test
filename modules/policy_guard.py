@@ -170,6 +170,16 @@ class PolicyGuard:
             if not d.allowed:
                 return d
 
+        # blind retry для всех mutate-инструментов (RC2/RC7): два идентичных
+        # неудачных повтора без изменения состояния → блок. Для browser_video
+        # это же правило исполняется внутри _check_video.
+        if tool in ("browser_scroll", "browser_new_tab", "browser_navigate",
+                    "browser_click_text", "browser_click_selector",
+                    "browser_press_key"):
+            d = self._check_blind_retry(tool, args, s)
+            if not d.allowed:
+                return d
+
         if tool == "browser_search_on_page":
             d = self._check_icon_text_search(args)
             if not d.allowed:
