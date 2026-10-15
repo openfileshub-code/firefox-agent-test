@@ -193,23 +193,39 @@ class PolicyGuard:
         # site-level forbidden tools (user JSON имеет приоритет над эвристиками).
         # browser_navigate разрешён в текущей вкладке: правила intent описывают
         # предпочтительный путь, но навигация = действие текущей вкладки.
-        if ctx is not None and tool != "browser_navigate":
-            site_forbidden = s.site_forbidden_tools(getattr(ctx, "site", "") or "")
-            if tool in site_forbidden:
-                override_cat = {
-                    "browser_new_tab": "allow_new_tab",
-                    "browser_scroll": "allow_scroll",
-                }.get(tool)
-                if not (override_cat and s.phrase_matches(
-                        override_cat, args.get("override_phrase"))):
-                    code = ("POLICY_SCROLL_NOT_REQUESTED" if tool == "browser_scroll"
-                            else "POLICY_NEW_TAB_NOT_ALLOWED")
-                    return _deny(
-                        code, tool, args,
-                        message="Инструмент '%s' запрещён правилами сайта "
-                                "user_tool_settings.json" % tool,
-                        suggestions=[{"tool": "browser_get_context"}],
-                    )
+        # Исключение — виртуальный инструмент browser_navigate_to_search_url:
+        # отдельного MCP-инструмента нет, его семантика = navigate/new_tab на
+        # URL выдачи, поэтому он блокирует именно эти вызовы (и только их).
+        if ctx is not None:
+            url = str(args.get("url") or "")
+            site_forbidden = s.site_forbidden_tools(
+                getattr(ctx, "site", "") or "")
+            virtual_hit = ("browser_navigate_to_search_url" in site_forbidden
+                           and tool in ("browser_navigate", "browser_new_tab")
+                           and uv.is_search_results_url(url))
+            if tool != "browser_navigate" or virtual_hit:
+                if tool in site_forbidden or virtual_hit:
+                    override_cat = {
+                        "browser_new_tab": "allow_new_tab",
+                        "browser_scroll": "allow_scroll",
+                        "browser_navigate": "allow_site_search",
+                    }.get(tool)
+                    if virtual_hit and tool == "browser_navigate":
+                        override_cat = "allow_site_search"
+                    if not (override_cat and s.phrase_matches(
+                            override_cat, args.get("override_phrase"))):
+                        if virtual_hit:
+                            code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
+                        elif tool == "browser_scroll":
+                            code = "POLICY_SCROLL_NOT_REQUESTED"
+                        else:
+                            code = "POLICY_NEW_TAB_NOT_ALLOWED"
+                        return _deny(
+                            code, tool, args,
+                            message="Инструмент '%s' запрещён правилами сайта "
+                                    "user_tool_settings.json" % tool,
+                            suggestions=[{"tool": "browser_get_context"}],
+                        )
 
         return ALLOW
 
