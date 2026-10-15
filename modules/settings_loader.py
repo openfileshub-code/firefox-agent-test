@@ -224,8 +224,11 @@ def canonical_hash(data: dict) -> str:
 
 
 class SettingsLoader:
-    def __init__(self, explicit_path: Optional[str] = None):
+    def __init__(self, explicit_path: Optional[str] = None,
+                 include_project_config: bool = True):
         self.explicit_path = explicit_path
+        #: false — для unit-тестов: не подмешивать проектный config в цепочку
+        self.include_project_config = include_project_config
         self._settings: Optional[UserSettings] = None
         self._active_path: Optional[Path] = None
         self._mtime: float = 0.0
@@ -300,7 +303,8 @@ class SettingsLoader:
         ap = _appdata_path()
         if ap:
             paths.append(ap)
-        paths.append(PROJECT_CONFIG_PATH)
+        if self.include_project_config:
+            paths.append(PROJECT_CONFIG_PATH)
         return paths
 
     def _read_file(self, path: Path) -> tuple[Optional[dict], list]:
@@ -318,16 +322,45 @@ class SettingsLoader:
 
     # ------------- public API -------------
     def load(self) -> UserSettings:
+        """Загрузка по цепочке источников.
+
+        Файл, который существует, но невалиден (битый JSON или нарушение
+        схемы), НЕ пропускается молча: фиксируется warning
+        `SETTINGS_INVALID_FALLBACK` и происходит откат на safe defaults —
+        так пользователь гарантированно видит, что его настройки не
+        применены (ТЗ §6.1, критерий Этапа 2).
+        """
         all_warnings: list = []
-        for path in self.candidate_paths():
+        broken_seen = False
+        paths = self.candidate_paths()
+        #: Явно заданный пользователем файл (CLI/explicit/env) при ошибке
+        #: даёт immediate fallback на safe defaults — без тихого подхвата
+        #: нижестоящих конфигураций (принцип «не ронять, но и не подменять»).
+        explicit_set = {str(Path(self.explicit_path).resolve())
+                        if self.explicit_path else "",
+                        str(Path(os.environ.get(ENV_VAR)).resolve())
+                        if os.environ.get(ENV_VAR) else ""}
+        for idx, path in enumerate(paths):
+            exists = path.exists()
             data, warnings = self._read_file(path)
             all_warnings.extend(warnings)
+            is_explicit = str(path.resolve()) in explicit_set and idx == 0
             if data is None:
+                if exists:
+                    broken_seen = True
+                    all_warnings.append(
+                        "SETTINGS_INVALID_FALLBACK: %s: %s"
+                        % (path, "; ".join(warnings)))
+                    if is_explicit:
+                        break
                 continue
             vr = self.validate(data)
             if not vr.valid:
                 all_warnings.append(
                     "SETTINGS_INVALID_FALLBACK: %s: %s" % (path, "; ".join(vr.errors)))
+                broken_seen = True
+                if is_explicit:
+                    break
                 continue
             settings = UserSettings(
                 data=data,
@@ -355,6 +388,11 @@ class SettingsLoader:
         self._settings = defaults
         self._active_path = None
         self._mtime = 0.0
+        if broken_seen:
+            logger.warning(
+                "settings: SETTINGS_INVALID_FALLBACK — применены safe defaults")
+        for w in all_warnings:
+            logger.warning("settings: %s", w)
         return defaults
 
     def get(self) -> UserSettings:
