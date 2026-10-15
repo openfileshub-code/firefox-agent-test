@@ -29,7 +29,7 @@ SEARCH_URL_MARKERS = (
 )
 
 PLACEHOLDER_TOKENS = ("...", "{", "}", "[", "]", "<", ">", "$")
-PLACEHOLDER_WORDS = ("VIDEO_ID", "video_id", "example", "placeholder",
+PLACEHOLDER_WORDS = ("VIDEO_ID", "video_id", "placeholder",
                      "your_", "site.tld", "xxx", "yyy")
 
 _TEST_WORD_RE = re.compile(r"(^|[^a-z0-9_-])test([^a-z0-9_-]|$)", re.I)
@@ -88,10 +88,15 @@ def is_placeholder_url(url: str) -> bool:
             return True
     if _TEST_WORD_RE.search(low):
         return True
-    # пустой или оборванный v-параметр: watch?v= без значения/с многоточием
-    m = re.search(r"[?&]v=([^&#]*)", u)
-    if m and not YOUTUBE_VIDEO_ID_RE.match(m.group(1)):
-        return True
+    # placeholder-значения в v-/q-параметрах (VIDEO_ID, your_id и т.п.) —
+    # проверяются ДО формата: невалидный по длине id = реальный id с ошибкой,
+    # его ловит POLICY_INVALID_YOUTUBE_VIDEO_ID, а не placeholder-фильтр
+    for m in re.finditer(r"[?&](?:v|video_id|search_query|q)=([^&#]*)", u):
+        val = m.group(1)
+        vl = val.lower()
+        if any(w in vl for w in ("video_id", "your_", "placeholder", "xxx",
+                                 "yyy", "example")) or "<" in val or ">" in val:
+            return True
     return False
 
 

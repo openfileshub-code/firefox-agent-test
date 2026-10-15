@@ -11,11 +11,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from modules import url_validator as uv
+
+log = logging.getLogger("FirefoxMCP_PolicyGuard")
 
 # ---------------------------------------------------------------
 # error_code -> раздел SKILL.md (единый источник истины)
@@ -127,6 +130,13 @@ class PolicyGuard:
 
     # ------------------------------------------------------------------
     def check(self, tool: str, args: dict, context=None) -> PolicyDecision:
+        try:
+            return self._check_inner(tool, args, context)
+        except Exception:  # noqa: BLE001 — guard не должен ронять tool call
+            log.exception("PolicyGuard.check(%s) internal error — allow", tool)
+            return ALLOW
+
+    def _check_inner(self, tool: str, args: dict, context=None) -> PolicyDecision:
         args = args or {}
         ctx = context if context is not None else self.context()
         s = self.settings
@@ -257,6 +267,17 @@ class PolicyGuard:
                             "^[A-Za-z0-9_-]{11}$." % vid,
                     suggestions=[{"tool": "browser_find_link",
                                   "args": {"pattern": ""}}])
+        # watch-подобный URL с невалидным/пустым v-параметром (ловит
+        # url_validator: 'watch?v=short', 'youtu.be/abc')
+        vr = uv.validate_navigation_url(
+            url, allow_search_override=True)
+        if (not vr.valid
+                and vr.error_code == "POLICY_INVALID_YOUTUBE_VIDEO_ID"):
+            return _deny(
+                "POLICY_INVALID_YOUTUBE_VIDEO_ID", tool, args,
+                message=vr.message or "Невалидный YouTube video_id",
+                suggestions=[{"tool": "browser_find_link",
+                              "args": {"pattern": ""}}])
         # same-tab: навигация с уходом с текущего сайта при locked контексте
         if tool == "browser_navigate" and not args.get("new_tab"):
             if ctx is not None and getattr(ctx, "same_tab_required", False) \
