@@ -253,6 +253,23 @@ class BaseVideoAdapter:
             return None, None
         return data.get("volume"), data.get("muted")
 
+    def _volume_tolerance(self) -> float:
+        """Допуск проверки громкости из user_tool_settings (RC9).
+
+        Настройка global.volume_tolerance (по умолчанию 0.005). Хардкод
+        0.02 признавал успех при целевых 10% и фактических 8.01% — теперь
+        порог читается из настроек; при недоступности loader'а — 0.005.
+        """
+        tol = 0.005
+        try:
+            from modules.settings_loader import get_global_loader
+            value = get_global_loader().get().g("volume_tolerance")
+            if isinstance(value, (int, float)) and 0 < float(value) <= 0.5:
+                tol = float(value)
+        except Exception:  # noqa: BLE001 - настройки не должны ронять плеер
+            pass
+        return tol
+
     async def _verify_volume(
         self,
         target: float,
@@ -260,14 +277,17 @@ class BaseVideoAdapter:
         delay: float = 0.25,
     ) -> dict[str, Any]:
         """Проверяет, что громкость удержалась; при сбросе — переустанавливает."""
+        tolerance = self._volume_tolerance()
         reapplied = 0
         for i in range(attempts):
             if i:
                 await asyncio.sleep(delay)
             volume, muted = await self._read_video_volume()
-            if volume is not None and abs(volume - target) <= 0.02 and not muted:
+            if volume is not None and abs(volume - target) <= tolerance \
+                    and not muted:
                 return {"applied": True, "volume": volume,
-                        "muted": muted, "attempts": reapplied}
+                        "muted": muted, "attempts": reapplied,
+                        "tolerance": tolerance}
             # Значение сброшено/переписано — повторяем установку напрямую.
             reapply = await self._html5("volume_set", target)
             if isinstance(reapply, dict) and reapply.get("ok"):
@@ -275,7 +295,7 @@ class BaseVideoAdapter:
         volume, muted = await self._read_video_volume()
         applied = (
             volume is not None
-            and abs(volume - target) <= 0.02
+            and abs(volume - target) <= tolerance
             and not muted
         )
         return {"applied": applied, "volume": volume,

@@ -917,7 +917,7 @@ class BrowserController:
                 self.link_cache.mark_dirty()
 
         status = getattr(response, "status", None)
-        return {
+        result = {
             "ok": True,
             "url": page.url,
             "title": await page.title(),
@@ -925,6 +925,23 @@ class BrowserController:
             "http_error": bool(status and status >= 400),
             "tab_id": self._page_id(page),
         }
+        # Идентификаторы для ContextManager (RC5/RC11): видео/плейлист
+        # видны уже из URL без дорогого evaluate.
+        with contextlib.suppress(Exception):
+            from urllib.parse import urlparse as _up, parse_qs as _pq
+            _qs = _pq(_up(page.url or "").query)
+            vid = (_qs.get("v") or [""])[0]
+            if vid:
+                result["video_id"] = vid
+            lid = (_qs.get("list") or [""])[0]
+            if lid:
+                result["list_id"] = lid
+                if lid.startswith("RD"):
+                    result["is_radio"] = True
+            idx = (_qs.get("index") or [""])[0]
+            if idx.isdigit():
+                result["index"] = int(idx)
+        return result
 
     async def cmd_go_back(self, params: dict[str, Any]) -> dict[str, Any]:
         """Шаг назад по истории вкладки (системная правка №5).
@@ -1004,7 +1021,7 @@ class BrowserController:
             )
             status = getattr(response, "status", None)
 
-        return {
+        result = {
             "ok": True,
             "index": self.active_index,
             "tab_id": self.active_tab_id,
@@ -1012,6 +1029,22 @@ class BrowserController:
             "http_status": status,
             "tabs": await self.tab_list(),
         }
+        if url_value:
+            with contextlib.suppress(Exception):
+                from urllib.parse import urlparse as _up, parse_qs as _pq
+                _qs = _pq(_up(page.url or "").query)
+                vid = (_qs.get("v") or [""])[0]
+                if vid:
+                    result["video_id"] = vid
+                lid = (_qs.get("list") or [""])[0]
+                if lid:
+                    result["list_id"] = lid
+                    if lid.startswith("RD"):
+                        result["is_radio"] = True
+                idx = (_qs.get("index") or [""])[0]
+                if idx.isdigit():
+                    result["index"] = int(idx)
+        return result
 
     async def cmd_close_tab(self, params: dict[str, Any]) -> dict[str, Any]:
         pages = self.pages

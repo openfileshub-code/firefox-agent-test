@@ -234,6 +234,11 @@ class SettingsLoader:
         self._mtime: float = 0.0
         self._schema: Optional[dict] = None
 
+    @property
+    def active_path(self) -> Optional[str]:
+        """Путь к фактически применённому файлу настроек (или None)."""
+        return str(self._active_path) if self._active_path else None
+
     # ------------- schema/validation -------------
     def _load_schema(self) -> Optional[dict]:
         if self._schema is None:
@@ -426,7 +431,32 @@ class SettingsLoader:
         return self.load()
 
 
+_GLOBAL_LOADER: Optional["SettingsLoader"] = None
+
+
+def get_global_loader() -> "SettingsLoader":
+    """Ленивый процесс-уровневый синглтон настроек.
+
+    Используется адаптерами (volume_tolerance) и server.py; при явной
+    инициализации через init_global_loader() переиспользуется тот же
+    экземпляр, что гарантирует единый источник настроек на процесс.
+    """
+    global _GLOBAL_LOADER
+    if _GLOBAL_LOADER is None:
+        _GLOBAL_LOADER = SettingsLoader()
+        _GLOBAL_LOADER.load()
+    return _GLOBAL_LOADER
+
+
+def init_global_loader(loader: "SettingsLoader") -> "SettingsLoader":
+    """Установить синглтон (вызывается из server.py после создания)."""
+    global _GLOBAL_LOADER
+    _GLOBAL_LOADER = loader
+    return loader
+
+
 __all__ = [
     "SettingsLoader", "UserSettings", "ValidationResult",
     "SAFE_DEFAULT_GLOBAL", "canonical_hash", "ENV_VAR",
+    "get_global_loader", "init_global_loader",
 ]
