@@ -26,6 +26,7 @@ from modules.settings_loader import (                        # noqa: E402
     SettingsLoader, init_global_loader,
 )
 from modules import url_validator as uv                      # noqa: E402
+from modules.relevance_ranker import RelevanceRanker          # noqa: E402
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -707,7 +708,26 @@ async def browser_search_on_page(
 
 @mcp.tool()
 async def browser_find_link(pattern: str = "") -> dict:
-    return await call("find_link", {"pattern": pattern})
+    """Найти кликабельные элементы страницы по тексту/href с ранжированием.
+
+    Возвращает candidates (candidate_id/text/href/video_id/score). Если
+    лучший score < relevance_threshold — ответ содержит error_code
+    NO_CONFIDENT_MATCH_ON_CURRENT_PAGE: не кликай вслепую, раскрой меню
+    или уточни запрос.
+    """
+    result = await call("find_link", {"pattern": pattern})
+    items = result.get("links") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        return result
+    try:
+        threshold = float(SETTINGS_LOADER.get().g("relevance_threshold")
+                          or 0.55)
+    except Exception:
+        threshold = 0.55
+    ranked = RelevanceRanker(threshold=threshold).rank_and_wrap(
+        pattern, items, source=str(result.get("source") or "live_dom"))
+    ranked["url"] = result.get("url", "")
+    return ranked
 
 
 @mcp.tool()
