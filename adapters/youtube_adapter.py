@@ -334,6 +334,13 @@ class YoutubeAdapter(BaseVideoAdapter):
         * ``html5-small-player-mode`` — компактный плеер (по умолчанию).
         Отдельно помечается кинематографический режим yt-cinematics
         (``cinematics-enabled``), который НЕ является theater-режимом.
+
+        Дополнительно возвращается ``layout_state`` — мультиканальная
+        детекция (ТЗ этап 8, RC10): CSS-классы (вес 0.45), aria-label
+        кнопки размера (0.35), соотношение сторон плеера (0.15),
+        признак отсутствия fullscreen (0.05). Поля ``confidence`` и
+        ``evidence`` позволяют guard'у отличать достоверный theater от
+        ложного ``theater_mode:false``.
         """
         modes = await super().get_player_modes()
         try:
@@ -341,7 +348,9 @@ class YoutubeAdapter(BaseVideoAdapter):
             () => {
               const out = { theater: false, full_window: false,
                             small_player: false, cinematics: false,
-                            container_class: '' };
+                            container_class: '',
+                            aria_theater_on: null, aria_theater_off: null,
+                            ratio: null };
               const sels = ['#movie_player', '#ytd-player',
                             'ytd-watch-flexy', '.html5-video-container'];
               for (const sel of sels) {
@@ -356,6 +365,29 @@ class YoutubeAdapter(BaseVideoAdapter):
               }
               const mp = document.querySelector('#movie_player');
               if (mp) out.container_class = String(mp.className || '');
+              // aria-сигнал: состояние кнопки переключения режима
+              const labelsOn = ['Exit theater mode', 'Выйти из широкоэкранного',
+                                'Выйти в стандартный режим',
+                                'Switch to default view'];
+              const labelsOff = ['Enter theater mode', 'Theater mode',
+                                 'Широкоэкранный режим',
+                                 'Переключить широкоэкранный режим'];
+              const btn = document.querySelector('.ytp-size-button')
+                       || document.querySelector('button[aria-label]');
+              const norm = (s) => String(s || '').toLowerCase();
+              for (const b of document.querySelectorAll(
+                     '.ytp-size-button, #movie_player button[aria-label]')) {
+                const a = norm(b.getAttribute('aria-label'));
+                if (!a) continue;
+                if (labelsOn.some(l => a.includes(norm(l)))) out.aria_theater_on = true;
+                if (labelsOff.some(l => a.includes(norm(l)))) out.aria_theater_off = true;
+              }
+              // геометрический сигнал: ширина плеера относительно окна
+              try {
+                if (mp && window.innerWidth > 0) {
+                  out.ratio = mp.getBoundingClientRect().width / window.innerWidth;
+                }
+              } catch (e) {}
               return out;
             }
             """) or {}
@@ -366,7 +398,119 @@ class YoutubeAdapter(BaseVideoAdapter):
         modes["small_player_mode"] = bool(info.get("small_player"))
         modes["cinematics"] = bool(info.get("cinematics"))
         modes["container_class"] = str(info.get("container_class", ""))[:300]
+
+        # --- layout_state: мультиканальная детекция (RC10) ---
+        evidence: list[str] = []
+        score = 0.0
+        if info.get("theater"):
+            score += 0.45
+            evidence.append("css_theater_class")
+        aria_on = info.get("aria_theater_on")
+        aria_off = info.get("aria_theater_off")
+        if aria_on is True and aria_off is not True:
+            score += 0.35
+            evidence.append("aria_exit_theater")
+        elif aria_off is True and aria_on is not True:
+            evidence.append("aria_enter_theater")  # сигнал «не theater»
+        ratio = info.get("ratio")
+        if isinstance(ratio, (int, float)):
+            if ratio >= 0.92:
+                score += 0.15
+                evidence.append("ratio_wide:%.2f" % ratio)
+            else:
+                evidence.append("ratio_default:%.2f" % ratio)
+        if not modes.get("fullscreen"):
+            score += 0.05
+            evidence.append("not_fullscreen")
+        confidence = round(min(1.0, max(0.0, score)), 2)
+        # Решение: theater, если основной CSS-сигнал ИЛИ два независимых
+        # дополнительных сигнала (aria+ratio) подтверждают широкий режим.
+        theater_detected = bool(info.get("theater")) or (
+            aria_on is True and isinstance(ratio, (int, float)) and ratio >= 0.92)
+        if theater_detected and confidence < 0.45:
+            confidence = 0.45
+        modes["theater_mode"] = theater_detected
+        modes["layout_state"] = {
+            "mode": ("theater" if theater_detected else
+                     ("default" if info.get("small_player") or
+                      aria_off is True or confidence >= 0.45 else "unknown")),
+            "theater_mode": theater_detected,
+            "fullscreen": modes.get("fullscreen"),
+            "confidence": confidence,
+            "evidence": evidence,
+        }
         return modes
+
+    async def layout_state(self) -> dict[str, Any]:
+        """Мультиканальный снимок layout с confidence/evidence (RC10)."""
+        modes = await self.get_player_modes()
+        lay = modes.get("layout_state") or {}
+        if not lay:
+            return {
+                "ok": False,
+                "error": "THEATER_STATE_UNKNOWN",
+                "action": "layout_state",
+                "message": "Layout не определяется на этой странице.",
+            }
+        return {
+            "ok": True,
+            "action": "layout_state",
+            "layout": lay,
+            "theater_mode": lay.get("theater_mode"),
+            "fullscreen": lay.get("fullscreen"),
+            "container_class": modes.get("container_class", ""),
+        }
+
+    async def set_theater_mode(self, enabled: Any) -> dict[str, Any]:
+        """Идемпотентная установка theater-режима (RC7).
+
+        Повторный запрос того же режима — no-op (``changed:false``);
+        переключение выполняется только при реальном расхождении
+        целевого и текущего состояний.
+        """
+        if isinstance(enabled, str):
+            low = enabled.strip().lower()
+            enabled = low in ("true", "1", "on", "yes", "включить", "да")
+        elif enabled is None:
+            enabled = True
+        else:
+            enabled = bool(enabled)
+
+        before = await self.get_player_modes()
+        current = bool(before.get("theater_mode"))
+        lay_before = before.get("layout_state") or {}
+        if current == enabled:
+            return {
+                "ok": True,
+                "action": "theater_set",
+                "changed": False,
+                "theater_mode": current,
+                "layout": lay_before,
+                "message": "Режим уже '%s' — действие не выполнено (no-op)." % (
+                    "theater" if enabled else "default"),
+            }
+
+        toggled = await self.toggle_theater_mode()
+        after = await self.get_player_modes()
+        now = bool(after.get("theater_mode"))
+        result = {
+            "ok": True,
+            "action": "theater_set",
+            "changed": now != current,
+            "theater_mode": now,
+            "layout": after.get("layout_state") or {},
+            "method": toggled.get("method") if isinstance(toggled, dict) else None,
+            "tried_channels": (toggled.get("tried_channels")
+                               if isinstance(toggled, dict) else []),
+        }
+        if now != enabled:
+            result["ok"] = False
+            result["error"] = "THEATER_SET_FAILED"
+            result["message"] = (
+                "После переключения theater_mode=%s, ожидалось %s; "
+                "проверьте layout_state (confidence=%s)" % (
+                    now, enabled, (after.get("layout_state") or {}).get("confidence")))
+        return result
 
     async def toggle_theater_mode(self) -> dict[str, Any]:
         """Переключение театрального режима с дублирующими каналами (правка №3).

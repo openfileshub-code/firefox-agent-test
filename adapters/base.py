@@ -158,21 +158,10 @@ class BaseVideoAdapter:
     async def pause(self) -> dict[str, Any]:
         return await self._html5("pause")
 
-    async def set_volume(self, percent: float) -> dict[str, Any]:
-        # Правка №7: нормализуем аргумент (доли 0..1 и проценты 0..100),
-        # чтобы VideoController всегда получал значение в диапазоне 0..1.
-        try:
-            fraction = self._normalize_volume_arg(percent)
-        except (TypeError, ValueError):
-            return {
-                "ok": False,
-                "error": "ValueRequired",
-                "message": ("set_volume требует число: доля 0..1 или "
-                            "проценты 0..100 (например 50 или 0.5)"),
-            }
-        return await self._html5("volume_set", fraction)
-
     async def seek(self, seconds: float) -> dict[str, Any]:
+        return await self._html5("seek_to", seconds)
+
+    async def state(self) -> dict[str, Any]:
         """Базовое состояние + платформенные поля (режимы плеера).
 
         Системная правка №2: в state добавлены theater_mode/fullscreen —
@@ -317,6 +306,21 @@ class BaseVideoAdapter:
 
     async def toggle_theater_mode(self) -> dict[str, Any]:
         return self._unsupported("toggle_theater_mode")
+
+    async def layout_state(self) -> dict[str, Any]:
+        """Снимок layout для платформ без theater-режима."""
+        modes = await self.get_player_modes()
+        lay = modes.get("layout_state") or {
+            "mode": "unknown",
+            "theater_mode": modes.get("theater_mode"),
+            "fullscreen": modes.get("fullscreen"),
+            "confidence": None,
+            "evidence": ["generic_adapter"],
+        }
+        return {"ok": True, "action": "layout_state", "layout": lay}
+
+    async def set_theater_mode(self, enabled: Any) -> dict[str, Any]:
+        return self._unsupported("theater_set")
 
     async def next_video(self) -> dict[str, Any]:
         return self._unsupported("next_video")
