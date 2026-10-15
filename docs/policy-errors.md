@@ -38,6 +38,7 @@
 | `VIDEO_CONTEXT_CHANGED` | `expected_video_id != actual_video_id` (radio drift) | §Потеря контекста из-за radio autoplay | `episode_open(video_id=expected)` |
 | `NO_EPISODE_CONTEXT` | episode-действие при отсутствии очереди/плейлиста | §Нативная навигация по эпизодам | `episode_list`, `browser_get_context` |
 | `NO_CONFIDENT_MATCH_ON_CURRENT_PAGE` | лучший кандидат ranker < `relevance_threshold` (0.55) | §Точность сопоставления элементов | уточнить запрос; `browser_expand_menu` |
+| `NO_CHAPTER_CONTEXT` | `chapter_seek`/`chapter_list` при отсутствии глав у видео | §Нативная навигация по эпизодам | работать с эпизодами (`episode_list`) или таймкодами вручную |
 | `THEATER_STATE_UNKNOWN` | layout confidence < 0.45 (unknown band) | §Театральный режим YouTube | fallback-определение, не blind toggle |
 | `THEATER_SET_FAILED` | theater не установлен после fallback chain + retries | §Театральный режим YouTube | `browser_screenshot` для диагностики |
 | `SETTINGS_INVALID_FALLBACK` | невалидный `user_tool_settings.json` → применены safe defaults | §Пользовательские настройки инструментов | исправить JSON, `browser_reload_settings` |
