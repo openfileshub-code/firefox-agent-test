@@ -27,6 +27,33 @@ STOP_TIMEOUT = 30
 SUPPORTED_PROTOCOL_VERSIONS = (4, 5)
 
 
+def _state_version(state):
+    """Version of the protocol recorded in the state file (int or None)."""
+    if not isinstance(state, dict):
+        return None
+    try:
+        return int(state.get("version"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_supported_state(state) -> bool:
+    return _state_version(state) in SUPPORTED_PROTOCOL_VERSIONS
+
+
+def _is_newer_state(state) -> bool:
+    """State written by a daemon NEWER than this control script.
+
+    Such a daemon is fully functional; this older script must not treat its
+    state file as garbage: stop must still be sent and start must not spawn
+    a second process against the same locked profile.
+    """
+    version = _state_version(state)
+    if version is None:
+        return False
+    return version > max(SUPPORTED_PROTOCOL_VERSIONS)
+
+
 def log(message: str) -> None:
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as stream:
@@ -132,11 +159,19 @@ def authenticated_request(state: dict, command: str, request_id: int) -> dict:
                 raise PermissionError(
                     auth_reply.get("error", "Ошибка авторизации демона")
                 )
-            if auth_reply.get("protocol") not in SUPPORTED_PROTOCOL_VERSIONS:
-                raise RuntimeError(
-                    "Версия протокола демона не поддерживается: "
-                    f"{auth_reply.get('protocol')!r}"
-                )
+            proto = auth_reply.get("protocol")
+            if proto not in SUPPORTED_PROTOCOL_VERSIONS:
+                try:
+                    proto_ok = int(proto) >= min(SUPPORTED_PROTOCOL_VERSIONS)
+                except (TypeError, ValueError):
+                    proto_ok = False
+                if not proto_ok:
+                    raise RuntimeError(
+                        "Версия протокола демона не поддерживается: "
+                        f"{proto!r}"
+                    )
+                # Демон новее этого скрипта: базовые команды (ping/stop)
+                # протокольно стабильны, поэтому продолжаем общение.
 
             if command == "ping":
                 request = {"cmd": "ping", "id": request_id + 1}
@@ -170,7 +205,13 @@ def start_daemon() -> int:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     state = load_state()
-    if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+    if _is_newer_state(state):
+        print_and_log(
+            f"State-файл создан демоном новой версии протокола "
+            f"(v{state.get('version')}). Обновите daemon_control.py до "
+            "версии из того же репозитория, что и browserd.py."
+        )
+    if _is_supported_state(state) or _is_newer_state(state):
         if daemon_is_reachable(state):
             print_and_log(
                 f"Демон уже работает. PID={state.get('pid')}, "
@@ -237,7 +278,7 @@ def start_daemon() -> int:
     while time.monotonic() < deadline:
         state = load_state()
 
-        if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+        if _is_supported_state(state) or _is_newer_state(state):
             if state.get("status") in ("running", "degraded"):
                 if daemon_is_reachable(state):
                     print_and_log(
@@ -249,7 +290,7 @@ def start_daemon() -> int:
         if process.poll() is not None:
             # Процесс может завершиться, если профиль уже занят старым демоном.
             state = load_state()
-            if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+            if _is_supported_state(state) or _is_newer_state(state):
                 if daemon_is_reachable(state):
                     print_and_log(
                         f"Подключение к уже работающему демону успешно. "
@@ -279,12 +320,18 @@ def stop_daemon() -> int:
         print_and_log("State-файл демона не найден или не читается.")
         return 2
 
-    if state.get("version") not in SUPPORTED_PROTOCOL_VERSIONS:
+    if not (_is_supported_state(state) or _is_newer_state(state)):
         print_and_log(
             "Версия протокола state-файла не поддерживается. "
             "Остановка не отправлена."
         )
         return 3
+    if _is_newer_state(state):
+        print_and_log(
+            f"State-файл создан демоном новой версии протокола "
+            f"(v{state.get('version')}); отправляю штатную команду stop "
+            "(базовая команда совместима)."
+        )
 
     pid = state.get("pid")
     try:

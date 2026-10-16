@@ -238,18 +238,30 @@ class PolicyGuard:
         if global_allow and not getattr(ctx, "same_tab_required", True):
             return ALLOW
         if global_allow and not phrase:
-            # allow_new_tab без override-фразы всё равно требует явного
-            # запроса пользователя (ТЗ: guard проверяет whitelist)
+            # allow_new_tab без override-фразы: автоматический повтор в
+            # ТЕКУЩЕЙ вкладке (автономный recovery), а не переспрашивание
+            # пользователя. Требовать подтверждение здесь — значит заставлять
+            # агента отвечать «скажите, перейти ли по адресу…», что запрещено
+            # SKILL.md (§«Пользователь просит открыть сайт»).
+            url_arg = str(args.get("url") or "")
+            nav_suggestion = None
+            if url_arg.startswith(("http://", "https://")):
+                nav_suggestion = {
+                    "tool": "browser_navigate",
+                    "args": {"url": url_arg, "new_tab": False},
+                    "auto_retry": True,
+                }
             return _deny(
                 "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
                 message="browser_new_tab требует override-фразу пользователя "
-                        "(например «открой в новой вкладке»).",
-                suggestions=[{"tool": "browser_navigate",
-                              "args": {"url": args.get("url", ""),
-                                       "new_tab": False}},
-                             {"tool": "browser_find_link",
-                              "args": {"pattern": ""}}],
-                confirmation=True)
+                        "(например «открой в новой вкладке»). Если пользователь "
+                        "сказал просто «открой <сайт>» — немедленно повтори "
+                        "операцию через browser_navigate в текущей вкладке "
+                        "(см. suggestion с auto_retry), не переспрашивая его.",
+                suggestions=([] if nav_suggestion is None else [nav_suggestion])
+                            + [{"tool": "browser_find_link",
+                                "args": {"pattern": ""}}],
+                confirmation=False)
         # Автономный recovery (см. SKILL.md §«Пользователь просит открыть
         # сайт»): «открой <сайт>» — это навигация в ТЕКУЩЕЙ вкладке, а не
         # запрос новой. Поэтому прямой browser_navigate(url) предлагается

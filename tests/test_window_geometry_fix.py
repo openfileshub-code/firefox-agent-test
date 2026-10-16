@@ -74,6 +74,93 @@ def test_state_v4_still_reachable_by_start(monkeypatch):
     assert rc == 0
 
 
+def test_stop_daemon_sends_stop_to_newer_protocol_state(monkeypatch):
+    """Регрессия бага из логов: state v6 (или любой более новой версии) не
+    должен блокировать штатную остановку. Раньше stop не отправлялся, живой
+    демон держал lock профиля и все последующие старты падали."""
+    calls = []
+    state = {"version": 6, "pid": os.getpid(), "tcp_host": "127.0.0.1",
+             "tcp_port": 12345, "auth_token": "tok", "status": "running"}
+    monkeypatch.setattr(daemon_control, "load_state", lambda: state)
+
+    def fake_request(st, cmd, rid):
+        calls.append(cmd)
+        return {"ok": True, "stopping": True}
+
+    monkeypatch.setattr(daemon_control, "authenticated_request", fake_request)
+    monkeypatch.setattr(daemon_control, "pid_is_alive", lambda pid: False)
+
+    rc = daemon_control.stop_daemon()
+    assert rc == 0
+    assert calls == ["stop"]
+
+
+def test_start_does_not_spawn_second_daemon_for_newer_state(monkeypatch):
+    """State от демона НОВОЙ версии + живой PID => второй процесс НЕ запускается
+    (иначе «Профиль уже занят другим процессом», код выхода 2)."""
+    started = []
+    state = {"version": 6, "pid": os.getpid(), "tcp_host": "127.0.0.1",
+             "tcp_port": 12345, "auth_token": "tok", "status": "running"}
+    monkeypatch.setattr(daemon_control, "load_state", lambda: state)
+    monkeypatch.setattr(daemon_control, "daemon_is_reachable", lambda st: False)
+    monkeypatch.setattr(daemon_control, "pid_is_alive", lambda pid: True)
+
+    class _FakePy:
+        def exists(self):
+            return True
+
+        def __str__(self):
+            return "/usr/bin/python3"
+
+    monkeypatch.setattr(daemon_control, "PYTHON", _FakePy())
+    monkeypatch.setattr(daemon_control, "PYTHONW", _FakePy())
+
+    def fake_popen(*a, **kw):
+        started.append(a)
+        raise AssertionError("Popen не должен вызываться для живого newer-state")
+
+    monkeypatch.setattr(daemon_control.subprocess, "Popen", fake_popen)
+
+    rc = daemon_control.start_daemon()
+    assert rc == 3
+    assert started == []
+
+
+def test_authenticated_request_allows_newer_protocol(monkeypatch):
+    """Демон с protocol=6 отвечает на ping штатно — скрипт более старой
+    версии не должен считать это ошибкой."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = srv.accept()
+            with conn, conn.makefile("rwb") as stream:
+                stream.readline()  # auth
+                stream.write(json.dumps(
+                    {"ok": True, "protocol": 6}).encode() + b"\n")
+                stream.flush()
+                stream.readline()  # ping
+                stream.write(json.dumps(
+                    {"ok": True, "pong": True}).encode() + b"\n")
+                stream.flush()
+        except OSError:
+            pass
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    state = {"version": 6, "pid": os.getpid(), "tcp_host": "127.0.0.1",
+             "tcp_port": port, "auth_token": "tok"}
+    reply = daemon_control.authenticated_request(state, "ping", 1)
+    srv.close()
+    assert reply.get("ok") and reply.get("pong")
+
+
 def test_apply_geometry_accepts_scale_kwarg():
     from modules import os_window_control as owc
     import inspect
