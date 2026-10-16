@@ -88,10 +88,59 @@ class WindowManager:
         return None
 
     def should_enforce_os_window(self) -> bool:
-        """ТЗ 7.6: enforce_os_window + валидные размеры (headless — нет)."""
+        """ТЗ 7.6: enforce_os_window + валидные размеры (headless — нет).
+
+        Ограничено режимом "apply": геометрия из конфига принудительно
+        применяется к окну ОС. В режиме "track" (по умолчанию) менеджер
+        только отслеживает окно и ЗАПИСЫВАЕТ его геометрию в конфиг,
+        ничего не двигая.
+        """
+        if str(self.config.get("geometry_mode", "track")).lower() != "apply":
+            return False
         if not self.config.get("enforce_os_window"):
             return False
         width = self.config.get("width")
         height = self.config.get("height")
         return (isinstance(width, int) and isinstance(height, int)
                 and width > 0 and height > 0)
+
+    def should_track_geometry(self) -> bool:
+        """Режим "track": watchdog отслеживает окно и пишет геометрию в конфиг."""
+        return str(self.config.get("geometry_mode", "track")).lower() == "track"
+
+    def update_geometry(self, geo: Dict[str, Any]) -> bool:
+        """Сохранить фактическую геометрию окна в конфиг (и на диск).
+
+        Принимает словарь с ключами outerWidth/outerHeight/screenX/screenY
+        (значения — CSS px из window.* браузера). Возвращает True, если
+        конфиг изменился и был сохранён.
+        """
+        try:
+            width = int(geo.get("outerWidth") or 0)
+            height = int(geo.get("outerHeight") or 0)
+            x = int(geo.get("screenX") or 0)
+            y = int(geo.get("screenY") or 0)
+        except (TypeError, ValueError):
+            return False
+        if width <= 0 or height <= 0:
+            return False
+        cfg = self.config
+        changed = (
+            cfg.get("width") != width
+            or cfg.get("height") != height
+            or cfg.get("x") != x
+            or cfg.get("y") != y
+        )
+        if not changed:
+            return False
+        cfg["width"] = width
+        cfg["height"] = height
+        cfg["x"] = x
+        cfg["y"] = y
+        cfg["last_saved"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.save()
+        logger.info(
+            "WindowManager: геометрия окна сохранена в конфиг: "
+            "%dx%d @ (%d,%d)", width, height, x, y,
+        )
+        return True

@@ -406,9 +406,12 @@ class BrowserController:
             self.active_index = 0
             self.active_tab_id = self._page_id(self.pages[0])
 
-        # ТЗ 7.2 (системный уровень): сразу после старта принудить окно ОС
-        # к геометрии из конфига (с учётом DPI-масштаба страницы), чтобы не
-        # начинать цикл «watchdog дергает окно каждые 30 секунд».
+        # ТЗ 7.2 (системный уровень): принудить окно ОС к геометрии из
+        # конфига ТОЛЬКО при запуске браузера и только в режиме "apply".
+        # В режиме "track" (по умолчанию) окно не двигается: watchdog будет
+        # отслеживать его фактическую геометрию и записывать её в конфиг,
+        # а на следующем старте эти сохранённые размеры применятся сами
+        # (persistent-профиль / xulstore).
         if (not self.headless and self.window_manager is not None
                 and self.window_manager.should_enforce_os_window()):
             scale = 1.0
@@ -918,17 +921,23 @@ class BrowserController:
             log.warning("Принудительное применение геометрии не удалось: %s", exc)
 
     async def _check_window_geometry(self) -> None:
-        """Надзорный уровень геометрии (ТЗ 7.5).
+        """Надзорный уровень геометрии (ТЗ 7.5, переработанный).
 
-        Сравнивает фактические размеры окна/viewport с config/window.json;
-        при отклонении за порог вызывает os_window_control.apply_geometry().
+        Режимы (config/window.json, поле "geometry_mode"):
+        - "track" (по умолчанию): менеджер ТОЛЬКО отслеживает фактические
+          размеры/положение окна и записывает их в config/window.json.
+          Окно никогда не двигается. Применённые при открытии браузера
+          размеры (профиль/xulstore, viewport) становятся источником
+          истины для следующего запуска.
+        - "apply": прежнее поведение — сравнение с конфигом и принудительный
+          возврат окна к геометрии из конфига через os_window_control.
         Ошибки никогда не роняют watchdog (ТЗ 7.7).
         """
         wm = getattr(self, "window_manager", None)
-        if wm is None or not wm.config.get("enforce_os_window"):
+        if wm is None:
             return
         cfg = wm.config
-        # ТЗ 7.6: интервал надзора из конфига (watchdog_interval_seconds),
+        # Интервал надзора из конфига (watchdog_interval_seconds),
         # дефолт — WATCHDOG_INTERVAL_SECONDS; не чаще дефолтного цикла.
         try:
             interval = int(cfg.get("watchdog_interval_seconds")
@@ -940,12 +949,6 @@ class BrowserController:
         if page is None or self.headless:
             return
         now = time.monotonic()
-        # Анти-дрейф: если последние применения не привели окно к целевым
-        # размерам (например, из-за DPI-масштаба или вмешательства WM),
-        # повторяем не чаще раза в 5 минут, а не каждые 30 секунд.
-        cooldown = getattr(self, "_geom_cooldown_until", 0.0)
-        if now < cooldown:
-            return
         if now - getattr(self, "_last_geometry_check", 0.0) < interval:
             return
         self._last_geometry_check = now
@@ -957,6 +960,22 @@ class BrowserController:
         except Exception:  # noqa: BLE001
             return
         if not isinstance(geo, dict):
+            return
+
+        # --- Режим track (по умолчанию): только наблюдение и запись ---
+        if wm.should_track_geometry():
+            with contextlib.suppress(Exception):
+                wm.update_geometry(geo)
+            return
+
+        # --- Режим apply: принудительный возврат к геометрии конфига ---
+        if not (wm.config.get("enforce_os_window") and wm.should_enforce_os_window()):
+            return
+        # Анти-дрейф: если последние применения не привели окно к целевым
+        # размерам (например, из-за DPI-масштаба или вмешательства WM),
+        # повторяем не чаще раза в 5 минут, а не каждые 30 секунд.
+        cooldown = getattr(self, "_geom_cooldown_until", 0.0)
+        if now < cooldown:
             return
         tolerance = int(cfg.get("tolerance_px", 10) or 10)
         drift = abs(int(geo.get("outerWidth") or 0) - int(cfg["width"])) > tolerance \
