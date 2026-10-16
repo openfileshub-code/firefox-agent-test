@@ -301,6 +301,161 @@ class YoutubeAdapter(BaseVideoAdapter):
             )
         return out
 
+    # ------------------------------------------------------------------
+    # ТЗ 5.1: установка громкости через GUI-перетаскивание ползунка
+    # ------------------------------------------------------------------
+    _VOLUME_SLIDER_BOX_JS = r"""
+    () => {
+      // Возвращает геометрию активного трека ползунка громкости в
+      // координатах страницы или null, если панель не найдена/скрыта.
+      const candidates = [
+        '.ytp-volume-slider',
+        '.ytp-volume-panel [role="slider"]',
+        '.ytp-volume-panel'
+      ];
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed')
+          continue;
+        return {
+          x: r.left + window.scrollX,
+          y: r.top + window.scrollY,
+          width: r.width,
+          height: r.height
+        };
+      }
+      return null;
+    }
+    """
+
+    async def set_volume_gui(self, percent: float) -> dict[str, Any]:
+        """Громкость через реальный UI: hover кнопки звука + drag ползунка.
+
+        Алгоритм (ТЗ 5.1): найти кнопку звука, навести курсор (раскрывает
+        панель), вычислить целевую X-координату трека по bounding_box,
+        выполнить быстрое перетаскивание (<200 мс), НЕМЕДЛЕННО увести
+        курсор из зоны плеера (иначе движения физической мыши пользователя
+        соберут слайдер), выждать 100–250 мс и проверить фактическое
+        значение; до 3 попыток. При недоступности панели — горячие клавиши
+        и честный ``verified: false``.
+        """
+        try:
+            target = self._normalize_volume_arg(percent)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": ("set_volume_gui требует число: доля 0..1 или "
+                            "проценты 0..100"),
+            }
+        requested_percent = round(target * 100, 1)
+        mouse = getattr(self.page, "mouse", None)
+        attempts = 0
+        volume_now: float | None = None
+        muted_now: bool | None = None
+        slider_used = False
+
+        if mouse is not None:
+            for attempt in range(1, 4):
+                attempts = attempt
+                try:
+                    # Шаг 2-3: кнопка звука -> hover для раскрытия панели.
+                    button = None
+                    for sel in (".ytp-mute-button", ".ytp-volume-panel",
+                                ".ytp-mute-toggle-button"):
+                        loc = self.page.locator(sel).first
+                        try:
+                            await loc.wait_for(state="visible", timeout=700)
+                            button = loc
+                            break
+                        except Exception:  # noqa: BLE001
+                            continue
+                    if button is None:
+                        break
+                    box = await button.bounding_box()
+                    if not box:
+                        break
+                    await mouse.move(box["x"] + box["width"] / 2.0,
+                                     box["y"] + box["height"] / 2.0,
+                                     steps=1)
+                    await asyncio.sleep(0.05)
+
+                    # Шаг 4-5: геометрия трека и целевая точка.
+                    track = await self.page.evaluate(
+                        self._VOLUME_SLIDER_BOX_JS)
+                    if not isinstance(track, dict) or track.get("width", 0) <= 0:
+                        break
+                    target_x = track["x"] + track["width"] * target
+                    target_y = track["y"] + track["height"] / 2.0
+                    start_x = track["x"] + track["width"] * max(
+                        0.0, min(1.0, (volume_now if volume_now
+                                       is not None else target)))
+
+                    # Шаг 6: быстрое перетаскивание (<200 мс суммарно).
+                    await mouse.move(start_x, target_y, steps=1)
+                    await mouse.down()
+                    await mouse.move(target_x, target_y, steps=2)
+                    await mouse.up()
+                    slider_used = True
+
+                    # Шаг 7 (ТЗ 3.3): немедленно убрать курсор из плеера.
+                    await mouse.move(0, 0, steps=1)
+
+                    # Шаг 8: короткое ожидание фиксации состояния YT.
+                    await asyncio.sleep(0.15)
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("YouTube GUI volume: попытка %s: %s",
+                                attempt, exc)
+                    # Курсор в нейтральную зону даже при сбое (ТЗ 3.3).
+                    try:
+                        await mouse.move(0, 0, steps=1)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+
+                # Шаг 9: фактическая проверка значения.
+                volume_now, muted_now = await self._read_video_volume()
+                if (volume_now is not None
+                        and abs(volume_now - target) <= 0.03
+                        and not muted_now):
+                    # Шаг 10: совпало — выходим.
+                    break
+                await asyncio.sleep(0.05)
+
+        verified = (volume_now is not None
+                    and abs(volume_now - target) <= 0.03
+                    and not (muted_now or False))
+        if not verified and not slider_used:
+            # Панель недоступна: горячие клавиши (приблизительный шаг
+            # ~4.5%) + честная отметка verified:false (ТЗ 5.1 «Обработка
+            # ошибок»).
+            await self._volume_via_hotkeys(target)
+            volume_now, muted_now = await self._read_video_volume()
+            verified = (volume_now is not None
+                        and abs(volume_now - target) <= 0.05
+                        and not (muted_now or False))
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "action": "set_volume",
+            "method": "gui_slider_drag" if slider_used else "hotkeys_fallback",
+            "requested_percent": requested_percent,
+            "volume": volume_now,
+            "muted": bool(muted_now) if muted_now is not None else None,
+            "verified": bool(verified),
+            "attempts": attempts or 1,
+            "platform": self.platform,
+        }
+        if not verified:
+            out["warning"] = (
+                "Точная громкость не подтверждена фактическим значением; "
+                "возможно, панель скрыта или плеер переопределяет звук."
+            )
+        return out
+
     async def _volume_via_hotkeys(self, target: float) -> None:
         """Грубая подстройка громкости клавишами ↑/↓ (±~4.5% за нажатие)."""
         try:
@@ -486,11 +641,71 @@ class YoutubeAdapter(BaseVideoAdapter):
         if vid:
             result["video_id"] = vid
             state.setdefault("video_id", vid)
+        else:
+            # ТЗ 5.2 п.3: video_id получить невозможно — null + warning.
+            result["video_id"] = None
+            state.setdefault("video_id", None)
+            result["warning"] = (
+                "video_id не определён (не ytInitialPlayerResponse, "
+                "не getVideoData, не URL ?v=) — точные действия по "
+                "контексту видео недоступны."
+            )
         if ids.get("list_id"):
             result["list_id"] = ids["list_id"]
-        if ids.get("is_radio"):
-            result["is_radio"] = True
-            state.setdefault("is_radio", True)
+        is_radio = bool(ids.get("is_radio"))
+        result["is_radio"] = is_radio
+        state.setdefault("is_radio", is_radio)
+
+        # --- Канонические поля состояния по ТЗ 5.2 -------------------
+        try:
+            pr = await self.page.evaluate(r"""
+            () => {
+              const out = {};
+              try {
+                const p = window.ytInitialPlayerResponse;
+                if (p && p.videoDetails) {
+                  out.title = p.videoDetails.title || null;
+                  if (!out.video_id)
+                    out.video_id = p.videoDetails.videoId || null;
+                }
+                if (p && p.playabilityStatus)
+                  out.autoplay_upcoming = !!(p.autoplay &&
+                                             p.autoplay.playableInApp);
+              } catch (e) {}
+              try {
+                const el = document.querySelector(
+                  '.ytp-upnext, .ytp-autonav-endscreen-upnext-container');
+                if (el && el.offsetParent !== null)
+                  out.autoplay_upcoming = true;
+              } catch (e) {}
+              return out;
+            }
+            """) or {}
+        except Exception:  # noqa: BLE001
+            pr = {}
+        if not result.get("video_id") and pr.get("video_id"):
+            result["video_id"] = pr["video_id"]
+            state["video_id"] = pr["video_id"]
+            result.pop("warning", None)
+        modes = state if isinstance(state, dict) else {}
+        result["platform"] = self.platform
+        result["url"] = getattr(self.page, "url", "") or state.get("url", "")
+        result["title"] = pr.get("title")
+        result["radio_mode"] = is_radio
+        result["playlist_id"] = ids.get("list_id")
+        result["theater_mode"] = modes.get("theater_mode")
+        result["fullscreen"] = modes.get("fullscreen")
+        result["autoplay_upcoming"] = bool(pr.get("autoplay_upcoming"))
+        html5_state = state.get("state") if isinstance(
+            state.get("state"), dict) else state
+        if isinstance(html5_state, dict):
+            for src, dst in (("paused", "paused"),
+                             ("currentTime", "currentTime"),
+                             ("duration", "duration"),
+                             ("volume", "volume"),
+                             ("muted", "muted")):
+                if src in html5_state:
+                    result[dst] = html5_state[src]
         return result
 
     async def layout_state(self) -> dict[str, Any]:
@@ -707,6 +922,97 @@ class YoutubeAdapter(BaseVideoAdapter):
     # ------------------------------------------------------------------
     # next_video
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # ТЗ 5.4: полноэкранный режим YouTube (мультиканальный)
+    # ------------------------------------------------------------------
+    async def fullscreen_enter(self) -> dict[str, Any]:
+        return await self._fullscreen_impl("fullscreen_enter")
+
+    async def fullscreen_exit(self) -> dict[str, Any]:
+        return await self._fullscreen_impl("fullscreen_exit")
+
+    async def _fullscreen_impl(self, action_name: str) -> dict[str, Any]:
+        """Полноэкранный режим: .ytp-fullscreen-button -> 'f' -> requestFullscreen.
+
+        Проверка результата — document.fullscreenElement + классы плеера.
+        Поиск по локализованному тексту кнопки не используется (ТЗ 5.4 п.3).
+        """
+        want = action_name == "fullscreen_enter"
+        if await self._is_fullscreen() == want:
+            return {"ok": True, "action": action_name,
+                    "fullscreen": want, "changed": False,
+                    "method": "already_active", "platform": self.platform}
+        tried: list[str] = []
+        # Канал 1: кнопка плеера (тап по ней переключает режим).
+        try:
+            btn = self.page.locator(".ytp-fullscreen-button").first
+            await btn.wait_for(state="visible", timeout=2000)
+            await btn.click(timeout=3000)
+            tried.append("ytp-fullscreen-button")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("YouTube FS: кнопка недоступна: %s", exc)
+        await asyncio.sleep(0.3)
+        if await self._is_fullscreen() == want:
+            return self._fs_result(action_name, want, tried[-1])
+        # Канал 2: горячая клавиша 'f' при фокусе на #movie_player.
+        try:
+            player = self.page.locator("#movie_player").first
+            await player.click(position={"x": 5, "y": 5}, timeout=2000)
+            await self.page.keyboard.press("f")
+            tried.append("hotkey_f")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("YouTube FS: hotkey f не удался: %s", exc)
+        await asyncio.sleep(0.3)
+        if await self._is_fullscreen() == want:
+            return self._fs_result(action_name, want, "hotkey_f")
+        # Канал 3: программный requestFullscreen / exitFullscreen.
+        try:
+            started = await self.page.evaluate(r"""
+            (want) => {
+              if (!want) {
+                const ex = document.exitFullscreen ||
+                           document.webkitExitFullscreen ||
+                           document.mozCancelFullScreen;
+                if (!ex) return false;
+                try { ex.call(document); } catch (e) { return false; }
+                return true;
+              }
+              const v = document.querySelector('video');
+              if (!v) return false;
+              const fn = v.requestFullscreen ||
+                         v.webkitRequestFullscreen ||
+                         v.mozRequestFullScreen;
+              if (!fn) return false;
+              try { fn.call(v); } catch (e) { return false; }
+              return true;
+            }
+            """, want)
+            if started:
+                tried.append("programmatic")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("YouTube FS: программный канал не удался: %s", exc)
+        await asyncio.sleep(0.4)
+        if await self._is_fullscreen() == want:
+            return self._fs_result(
+                action_name, want, tried[-1] if tried else "unknown")
+        return {
+            "ok": False,
+            "error": "ActionNotConfirmed",
+            "action": action_name,
+            "fullscreen": await self._is_fullscreen(),
+            "tried_channels": tried,
+            "message": "Ни один канал не изменил полноэкранный режим.",
+            "hint": "Проверьте активность страницы; browser_screenshot.",
+            "platform": self.platform,
+        }
+
+    @staticmethod
+    def _fs_result(action_name: str, active: bool,
+                   method: str) -> dict[str, Any]:
+        return {"ok": True, "action": action_name,
+                "fullscreen": bool(active), "changed": True,
+                "method": method, "platform": "youtube"}
+
     async def next_video(self) -> dict[str, Any]:
         aria_labels = self.selectors.get(
             "next_video_aria", ["Next video", "Следующее видео"])

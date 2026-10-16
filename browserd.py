@@ -2247,6 +2247,18 @@ class BrowserController:
 
         action = self._VIDEO_ACTION_ALIASES.get(action, action)
 
+        # ТЗ 5.3 / 5.5: специализированные действия уровня демона —
+        # агент может вызвать их и как browser_video action="disable_radio"
+        # / "save_to_playlist", и как прямые MCP-инструменты.
+        if action == "disable_radio":
+            disable_params = dict(params)
+            disable_params["value"] = value
+            return await self.cmd_disable_radio(disable_params)
+        if action == "save_to_playlist":
+            save_params = dict(params)
+            save_params["value"] = value
+            return await self.cmd_save_to_playlist(save_params)
+
         # Действия episodes/playlist обрабатываются на уровне демона
         # (ТЗ этап 9): они работают с ytInitialData и навигацией, а не
         # через платформенный адаптер плеера.
