@@ -39,8 +39,8 @@
           ],
           "forbidden_tools": [
             "browser_new_tab",
-            "browser_navigate",
-            "browser_scroll"
+            "browser_scroll",
+            "browser_navigate_to_search_url"
           ],
           "selection_strategy": "best_relevant_visible_link",
           "fallback": "report_not_found_without_site_search"

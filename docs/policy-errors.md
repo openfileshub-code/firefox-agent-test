@@ -25,7 +25,7 @@
 |---|---|---|---|
 | `POLICY_SAME_TAB_REQUIRED` | выход из зафиксированной текущей вкладки без override | §Жёсткая политика вкладок | `browser_navigate` в текущей вкладке |
 | `POLICY_NEW_TAB_NOT_ALLOWED` | `browser_new_tab`/`new_tab=true` без override-фразы | §Жёсткая политика вкладок | `browser_find_link`, `browser_navigate(new_tab=false)` |
-| `POLICY_SITE_SEARCH_NOT_REQUESTED` | URL `/results?search_query=`, `/search?q=`, `/query?` без override | §Поиск на сайте, §Hard Tab Policy | `browser_search_on_page`, `browser_find_link` |
+| `POLICY_SITE_SEARCH_NOT_REQUESTED` | URL `/results?search_query=`, `/search?q=`, `/query?` без override | §Поиск на сайте, §Hard Tab Policy | `browser_find_link` (ПЕРВЫМ), `browser_search_on_page` — агент обязан немедленно выполнить первое suggestion (§Обработка отказов PolicyGuard) |
 | `POLICY_SCROLL_NOT_REQUESTED` | `browser_scroll` без override-фразы | §Обработка скрытых элементов | `browser_expand_menu` |
 | `POLICY_PLACEHOLDER_URL_FORBIDDEN` | `... {} VIDEO_ID example test placeholder` в URL | §Запрет placeholder-URL | извлечь реальный ID (`browser_find_link`) |
 | `POLICY_INVALID_YOUTUBE_VIDEO_ID` | video_id не соответствует `^[A-Za-z0-9_-]{11}$` | §Запрет placeholder-URL | canonical URL с валидным ID |

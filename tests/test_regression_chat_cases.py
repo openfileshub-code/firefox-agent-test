@@ -345,3 +345,94 @@ class TestMiddlewareIntegration:
 
         result = asyncio.run(run())
         assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# RC12: deny POLICY_SITE_SEARCH_NOT_REQUESTED должен вести LLM к действию:
+# императивный message + browser_find_link ПЕРВЫМ в suggested_safe_actions
+# (агент механически выполняет первый suggestion; порядок = приоритет).
+# ---------------------------------------------------------------------------
+class TestRC12DenyActionability:
+    def test_site_search_deny_suggestions_order_and_message(self, stack):
+        guard, _, _ = stack
+        d = guard.check("browser_navigate", {
+            "url": "https://www.youtube.com/search?q=%D0%BC%D0%BE%D0%B9"
+                   "+%D0%B4%D0%B6%D0%B5%D0%BC"})
+        assert not d.allowed
+        assert d.error_code == "POLICY_SITE_SEARCH_NOT_REQUESTED"
+        tools = [a["tool"] for a in d.suggested_safe_actions]
+        assert tools[0] == "browser_find_link"
+        assert "browser_search_on_page" in tools
+        pattern = d.suggested_safe_actions[0]["args"]["pattern"]
+        assert pattern  # запрос извлечён из URL, не пустой
+        # message содержит прямой императив для LLM
+        assert "browser_find_link" in d.message
+        assert "Немедленно" in d.message
+
+    def test_project_settings_forbid_virtual_search_tool(self):
+        """config/user_tool_settings.json: intent open_item_on_current_page
+        активен и forbidden_tools включает виртуальный
+        browser_navigate_to_search_url (перехват «хитрых» search-URL)."""
+        data = json.loads((ROOT / "config" / "user_tool_settings.json")
+                          .read_text(encoding="utf-8"))
+        intents = data["sites"]["youtube.com"]["intents"]
+        assert "open_item_on_current_page" in intents
+        forbidden = intents["open_item_on_current_page"]["forbidden_tools"]
+        assert "browser_navigate_to_search_url" in forbidden
+
+    def test_skill_md_has_guard_deny_and_open_rules(self):
+        """SKILL.md обязан содержать директивы: всегда выполняй
+        suggested_safe_actions; «открой [название]» → сначала find_link."""
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        assert "### Обработка отказов PolicyGuard" in text
+        assert "suggested_safe_actions" in text
+        assert "ЗАПРЕЩЕНО повторять заблокированное действие" in text
+        assert "### Логика команды «Открой [название]»" in text
+        assert "browser_save_alias" in text
+        assert "### Пользовательские алиасы" in text
+
+
+# ---------------------------------------------------------------------------
+# RC13: пользовательские алиасы — MCP-инструменты browser_save_alias /
+# browser_list_aliases / browser_delete_alias (config/user_aliases.json).
+# ---------------------------------------------------------------------------
+class TestRC13UserAliases:
+    def _use_tmp_aliases(self, monkeypatch, tmp_path):
+        server = importlib.import_module("server")
+        monkeypatch.setattr(server, "ALIASES_PATH",
+                            tmp_path / "user_aliases.json")
+        return server
+
+    def test_save_list_delete_roundtrip(self, monkeypatch, tmp_path):
+        server = self._use_tmp_aliases(monkeypatch, tmp_path)
+        res = asyncio.run(server.browser_save_alias(
+            "Мой Джем", target_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+        assert res["ok"] is True
+        assert res["alias_name"] == "мой джем"
+        lst = asyncio.run(server.browser_list_aliases())
+        assert lst["count"] == 1
+        assert lst["aliases"][0]["target_url"].startswith("https://")
+        dele = asyncio.run(server.browser_delete_alias("мой джем"))
+        assert dele["ok"] is True
+        assert asyncio.run(server.browser_list_aliases())["count"] == 0
+
+    def test_save_requires_target(self, monkeypatch, tmp_path):
+        server = self._use_tmp_aliases(monkeypatch, tmp_path)
+        res = asyncio.run(server.browser_save_alias("что-то"))
+        assert res["ok"] is False
+        assert res["error_code"] == "ALIAS_TARGET_REQUIRED"
+
+    def test_save_rejects_search_results_url(self, monkeypatch, tmp_path):
+        server = self._use_tmp_aliases(monkeypatch, tmp_path)
+        res = asyncio.run(server.browser_save_alias(
+            "x", target_url="https://www.youtube.com/results?search_query=foo"))
+        assert res["ok"] is False
+        assert res["error_code"] == "POLICY_SITE_SEARCH_NOT_REQUESTED"
+
+    def test_save_with_search_query_ok(self, monkeypatch, tmp_path):
+        server = self._use_tmp_aliases(monkeypatch, tmp_path)
+        res = asyncio.run(server.browser_save_alias(
+            "мой джем", search_query="lofi hip hop radio"))
+        assert res["ok"] is True
+        lst = asyncio.run(server.browser_list_aliases())
+        assert lst["aliases"][0]["search_query"] == "lofi hip hop radio"
