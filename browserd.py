@@ -38,7 +38,7 @@ DEFAULT_PROFILE = BASE_DIR / "playwright_profile"
 LOG_FILE = BASE_DIR / "browserd.log"
 
 # Должно совпадать с server.py.
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_BYTES = 6 * 1024 * 1024
@@ -263,6 +263,11 @@ class BrowserController:
         if requested_tab_id:
             requested_tab_id = str(requested_tab_id)
             for page in pages:
+                if page is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    if page.is_closed():
+                        continue
                 if self._page_id(page) == requested_tab_id:
                     self.active_tab_id = requested_tab_id
                     self.active_index = pages.index(page)
@@ -277,6 +282,11 @@ class BrowserController:
         if self.active_tab_id:
             for index, page in enumerate(pages):
                 if self._page_id(page) == self.active_tab_id:
+                    # ТЗ 4.1: активная вкладка могла закрыться вручную —
+                    # не возвращаем закрытую страницу как активную.
+                    with contextlib.suppress(Exception):
+                        if page.is_closed():
+                            break
                     self.active_index = index
                     return page
 
@@ -598,33 +608,93 @@ class BrowserController:
         with contextlib.suppress(Exception):
             await dialog.dismiss()
 
+    #: Служебные URL, не являющиеся «настоящими» вкладками (ТЗ 4.1).
+    _BLANK_URLS = ("about:blank", "about:home")
+
     async def tab_list(self) -> list[dict[str, Any]]:
-        result = []
-        pages = self.pages
+        """Список живых вкладок (ТЗ 4.1: фильтрация фантомов).
 
-        for index, page in enumerate(pages):
-            title = ""
-            with contextlib.suppress(Exception):
-                title = await page.title()
+        Исключаются:
+        * закрытые страницы (``page.is_closed() == True``);
+        * служебные ``about:blank``, если в контексте есть другие
+          непустые вкладки.
 
-            tab_id = self._page_id(page)
-            try:
-                url = str(page.url or "")
-            except Exception:
-                url = ""
+        Если активная вкладка исчезла из живого набора, демон
+        автоматически переключается на первую живую вкладку; при
+        полном отсутствии живых страниц создается новая служебная,
+        но закрытая вкладка никогда не возвращается как активная.
+        """
+        raw_pages = self.pages
 
+        # Pass 1: собираем данные и признак живости.
+        infos: list[dict[str, Any]] = []
+        for page in raw_pages:
             try:
                 closed = bool(page.is_closed())
             except Exception:
                 closed = False
-
-            result.append({
-                "index": index,
-                "tab_id": tab_id,
+            if closed:
+                continue
+            try:
+                url = str(page.url or "")
+            except Exception:
+                url = ""
+            title = ""
+            with contextlib.suppress(Exception):
+                title = await page.title()
+            infos.append({
+                "page": page,
+                "tab_id": self._page_id(page),
                 "url": url,
                 "title": title,
-                "active": tab_id == self.active_tab_id,
-                "closed": closed,
+            })
+
+        # Pass 2: фильтрация about:blank, если есть содержательные вкладки.
+        has_real = any(
+            info["url"] and info["url"] not in self._BLANK_URLS
+            for info in infos
+        )
+        live = [
+            info for info in infos
+            if not (has_real and (
+                not info["url"] or info["url"] in self._BLANK_URLS))
+        ]
+
+        if len(live) != len(infos):
+            log.info(
+                "tab_list: отфильтровано %d служебных about:blank вкладок",
+                len(infos) - len(live),
+            )
+
+        # Pass 3: синхронизация активной вкладки с живым набором.
+        live_ids = {info["tab_id"] for info in live}
+        if self.active_tab_id not in live_ids:
+            if live:
+                self.active_tab_id = live[0]["tab_id"]
+                log.info(
+                    "Активная вкладка исчезла; переключение на живую: %s",
+                    self.active_tab_id,
+                )
+            elif self.context is not None and not self.stopping:
+                with contextlib.suppress(Exception):
+                    new_page = await self.context.new_page()
+                    self._wire_page(new_page)
+                    self.active_tab_id = self._page_id(new_page)
+                    log.warning(
+                        "Живых вкладок не осталось; создана служебная: %s",
+                        self.active_tab_id,
+                    )
+                    return await self.tab_list()
+
+        result = []
+        for index, info in enumerate(live):
+            result.append({
+                "index": index,
+                "tab_id": info["tab_id"],
+                "url": info["url"],
+                "title": info["title"],
+                "active": info["tab_id"] == self.active_tab_id,
+                "closed": False,
             })
 
         return result
@@ -1125,6 +1195,84 @@ class BrowserController:
             "tabs": await self.tab_list(),
         }
 
+    # ------------------------------------------------------------------
+    # Единый безопасный клик (ТЗ 4.3): scrollIntoViewIfNeeded ->
+    # wait visible/enabled -> click; структурированные коды ошибок.
+    # ------------------------------------------------------------------
+    CLICK_TIMEOUT_DEFAULT_S = 8
+    CLICK_TIMEOUT_MAX_S = 60
+
+    def _click_timeout_ms(self, params: dict[str, Any]) -> int:
+        try:
+            seconds = float(params.get("timeout", self.CLICK_TIMEOUT_DEFAULT_S))
+        except (TypeError, ValueError):
+            seconds = self.CLICK_TIMEOUT_DEFAULT_S
+        seconds = max(1.0, min(seconds, self.CLICK_TIMEOUT_MAX_S))
+        return int(seconds * 1000)
+
+    async def _safe_click(self, locator: Any, timeout_ms: int,
+                          label: str) -> dict[str, Any]:
+        """Клик с прокруткой и диагностическими кодами ошибок (ТЗ 4.3)."""
+        try:
+            if await locator.count() == 0:
+                return {
+                    "ok": False,
+                    "error": "ElementNotFound",
+                    "message": f"Элемент не найден: {label}",
+                    "hint": "browser_find_link / browser_screenshot для диагностики",
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            # scrollIntoViewIfNeeded до проверки видимости — элемент может
+            # существовать, но лежать за пределами текущего вьюпорта.
+            await locator.scroll_into_view_if_needed(timeout=timeout_ms)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": "ElementHidden",
+                "message": f"Элемент скрыт или недоступен для прокрутки: {label}",
+                "hint": f"scrollIntoViewIfNeeded не удалась: {exc}. "
+                        "Попробуйте browser_expand_menu или browser_scroll.",
+            }
+
+        try:
+            await locator.wait_for(state="visible", timeout=min(timeout_ms, 5000))
+        except Exception:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": "ElementHidden",
+                "message": f"Элемент не стал видимым после прокрутки: {label}",
+                "hint": "Возможно, требуется раскрыть меню (browser_expand_menu).",
+            }
+
+        try:
+            enabled = await locator.is_enabled()
+        except Exception:  # noqa: BLE001
+            enabled = True
+        if not enabled:
+            return {
+                "ok": False,
+                "error": "ElementDisabled",
+                "message": f"Элемент отключён (disabled): {label}",
+                "hint": "Дождитесь активации элемента или проверьте состояние страницы.",
+            }
+
+        try:
+            await locator.click(timeout=timeout_ms)
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            if "outside of the viewport" in message.lower():
+                return {
+                    "ok": False,
+                    "error": "ElementHidden",
+                    "message": f"Элемент остался вне области видимости: {label}",
+                    "hint": "Повторите browser_scroll_to_text/browser_expand_menu.",
+                }
+            raise
+        return {"ok": True}
+
     async def cmd_click_text(self, params: dict[str, Any]) -> dict[str, Any]:
         # Совмещённый интерфейс (системная правка №1): если передан
         # selector и не передан text — кликаем по селектору. Это даёт
@@ -1142,7 +1290,7 @@ class BrowserController:
                     "error": "Не задан ни текст, ни CSS selector"}
 
         index = int(params.get("index", 0))
-        timeout_ms = max(1000, min(int(params.get("timeout", 10)), 60) * 1000)
+        timeout_ms = self._click_timeout_ms(params)
 
         locator = page.get_by_text(
             text,
@@ -1150,7 +1298,12 @@ class BrowserController:
         )
         count = await locator.count()
         if count == 0:
-            return {"ok": False, "error": "Элемент с таким текстом не найден"}
+            return {
+                "ok": False,
+                "error": "ElementNotFound",
+                "message": "Элемент с таким текстом не найден",
+                "hint": "browser_search_text / browser_find_link для поиска",
+            }
 
         if index < 0 or index >= count:
             return {
@@ -1159,13 +1312,9 @@ class BrowserController:
             }
 
         target = locator.nth(index)
-        if not await target.is_visible():
-            return {"ok": False, "error": "Найденный элемент скрыт"}
-        if not await target.is_enabled():
-            return {"ok": False, "error": "Найденный элемент отключён"}
-
-        await target.scroll_into_view_if_needed(timeout=timeout_ms)
-        await target.click(timeout=timeout_ms)
+        click_result = await self._safe_click(target, timeout_ms, f"text={text!r}")
+        if not click_result.get("ok"):
+            return click_result
 
         if self.link_cache:
             with contextlib.suppress(Exception):
@@ -1185,15 +1334,10 @@ class BrowserController:
             return {"ok": False, "error": "CSS selector не задан"}
 
         locator = page.locator(selector).first
-        if await locator.count() == 0:
-            return {"ok": False, "error": "Элемент не найден"}
-        if not await locator.is_visible():
-            return {"ok": False, "error": "Элемент скрыт"}
-        if not await locator.is_enabled():
-            return {"ok": False, "error": "Элемент отключён"}
-
-        await locator.scroll_into_view_if_needed(timeout=8000)
-        await locator.click(timeout=8000)
+        click_result = await self._safe_click(
+            locator, self._click_timeout_ms(params), f"selector={selector!r}")
+        if not click_result.get("ok"):
+            return click_result
 
         if self.link_cache:
             with contextlib.suppress(Exception):
@@ -1558,15 +1702,10 @@ class BrowserController:
             return {"ok": False, "error": "CSS selector не задан"}
 
         locator = page.locator(selector).first
-        if await locator.count() == 0:
-            return {"ok": False, "error": "Элемент не найден"}
-        if not await locator.is_visible():
-            return {"ok": False, "error": "Элемент скрыт"}
-        if not await locator.is_enabled():
-            return {"ok": False, "error": "Элемент отключён"}
-
-        await locator.scroll_into_view_if_needed(timeout=8000)
-        await locator.click(timeout=8000)
+        click_result = await self._safe_click(
+            locator, self._click_timeout_ms(params), f"selector={selector!r}")
+        if not click_result.get("ok"):
+            return click_result
 
         if self.link_cache:
             with contextlib.suppress(Exception):

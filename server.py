@@ -33,7 +33,7 @@ from modules.audit_logger import get_audit_logger             # noqa: E402
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "playwright_profile"
 STATE_FILE = PROFILE_DIR / ".browserd_state.json"
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 MAX_FRAME_BYTES = 6 * 1024 * 1024
 
 TIMEOUTS = {
