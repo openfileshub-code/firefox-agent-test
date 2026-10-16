@@ -19,10 +19,12 @@ LOG_FILE = BASE_DIR / "daemon_control.log"
 PYTHON = BASE_DIR / ".venv" / "Scripts" / "python.exe"
 PYTHONW = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 CONNECT_TIMEOUT = 3
 START_TIMEOUT = 120
 STOP_TIMEOUT = 30
+#: Совместимые версии протокола state-файла (старый демон ещё рабочий).
+SUPPORTED_PROTOCOL_VERSIONS = (4, 5)
 
 
 def log(message: str) -> None:
@@ -130,9 +132,9 @@ def authenticated_request(state: dict, command: str, request_id: int) -> dict:
                 raise PermissionError(
                     auth_reply.get("error", "Ошибка авторизации демона")
                 )
-            if auth_reply.get("protocol") != PROTOCOL_VERSION:
+            if auth_reply.get("protocol") not in SUPPORTED_PROTOCOL_VERSIONS:
                 raise RuntimeError(
-                    "Версия протокола демона не совпадает: "
+                    "Версия протокола демона не поддерживается: "
                     f"{auth_reply.get('protocol')!r}"
                 )
 
@@ -168,7 +170,7 @@ def start_daemon() -> int:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     state = load_state()
-    if state and state.get("version") == PROTOCOL_VERSION:
+    if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
         if daemon_is_reachable(state):
             print_and_log(
                 f"Демон уже работает. PID={state.get('pid')}, "
@@ -235,7 +237,7 @@ def start_daemon() -> int:
     while time.monotonic() < deadline:
         state = load_state()
 
-        if state and state.get("version") == PROTOCOL_VERSION:
+        if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
             if state.get("status") in ("running", "degraded"):
                 if daemon_is_reachable(state):
                     print_and_log(
@@ -247,7 +249,7 @@ def start_daemon() -> int:
         if process.poll() is not None:
             # Процесс может завершиться, если профиль уже занят старым демоном.
             state = load_state()
-            if state and state.get("version") == PROTOCOL_VERSION:
+            if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
                 if daemon_is_reachable(state):
                     print_and_log(
                         f"Подключение к уже работающему демону успешно. "
@@ -277,9 +279,9 @@ def stop_daemon() -> int:
         print_and_log("State-файл демона не найден или не читается.")
         return 2
 
-    if state.get("version") != PROTOCOL_VERSION:
+    if state.get("version") not in SUPPORTED_PROTOCOL_VERSIONS:
         print_and_log(
-            "Версия протокола state-файла не совпадает. "
+            "Версия протокола state-файла не поддерживается. "
             "Остановка не отправлена."
         )
         return 3

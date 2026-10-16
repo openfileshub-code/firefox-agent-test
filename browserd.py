@@ -406,6 +406,21 @@ class BrowserController:
             self.active_index = 0
             self.active_tab_id = self._page_id(self.pages[0])
 
+        # ТЗ 7.2 (системный уровень): сразу после старта принудить окно ОС
+        # к геометрии из конфига (с учётом DPI-масштаба страницы), чтобы не
+        # начинать цикл «watchdog дергает окно каждые 30 секунд».
+        if (not self.headless and self.window_manager is not None
+                and self.window_manager.should_enforce_os_window()):
+            scale = 1.0
+            with contextlib.suppress(Exception):
+                dpr = await asyncio.wait_for(
+                    self.pages[0].evaluate("window.devicePixelRatio || 1"),
+                    timeout=5,
+                )
+                scale = float(dpr or 1.0)
+            self._apply_os_geometry(self.window_manager.config, scale=scale)
+            self._last_geometry_check = time.monotonic()
+
         log.info(
             "Camoufox started; pid=%d profile=%s tabs=%d",
             os.getpid(),
@@ -875,9 +890,32 @@ class BrowserController:
       screenX: window.screenX,
       screenY: window.screenY,
       innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight
+      innerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1
     })
     """
+
+    def _apply_os_geometry(self, cfg: dict, scale: float = 1.0) -> None:
+        """Принудить окно ОС к геометрии из конфига (ТЗ 7.4/7.5).
+
+        Координаты в конфиге — CSS px; на Windows пересчёт в физические
+        пиксели выполняет os_window_control через масштаб DPI/scale.
+        """
+        try:
+            from modules import os_window_control
+
+            applied = os_window_control.apply_geometry(
+                x=int(cfg.get("x", 0) or 0),
+                y=int(cfg.get("y", 0) or 0),
+                width=int(cfg["width"]),
+                height=int(cfg["height"]),
+                scale=scale,
+            )
+            log.info("os_window_control.apply_geometry -> %s", applied)
+        except ImportError as exc:
+            log.warning("os_window_control недоступен: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Принудительное применение геометрии не удалось: %s", exc)
 
     async def _check_window_geometry(self) -> None:
         """Надзорный уровень геометрии (ТЗ 7.5).
@@ -901,9 +939,16 @@ class BrowserController:
         page = self._resolve_page()
         if page is None or self.headless:
             return
-        if time.monotonic() - getattr(self, "_last_geometry_check", 0.0) < interval:
+        now = time.monotonic()
+        # Анти-дрейф: если последние применения не привели окно к целевым
+        # размерам (например, из-за DPI-масштаба или вмешательства WM),
+        # повторяем не чаще раза в 5 минут, а не каждые 30 секунд.
+        cooldown = getattr(self, "_geom_cooldown_until", 0.0)
+        if now < cooldown:
             return
-        self._last_geometry_check = time.monotonic()
+        if now - getattr(self, "_last_geometry_check", 0.0) < interval:
+            return
+        self._last_geometry_check = now
         try:
             geo = await asyncio.wait_for(
                 page.evaluate(self._GEOMETRY_JS),
@@ -919,22 +964,49 @@ class BrowserController:
             or abs(int(geo.get("screenX") or 0) - int(cfg.get("x", 0) or 0)) > 5 \
             or abs(int(geo.get("screenY") or 0) - int(cfg.get("y", 0) or 0)) > 5
         if not drift:
+            # Окно в норме: сбрасываем статистику неудачных применений.
+            self._geom_fail_streak = 0
+            self._geom_cooldown_until = 0.0
             return
         log.info("Watchdog: окно смещено (%s), применяю геометрию из конфига", geo)
+        scale = 1.0
+        with contextlib.suppress(Exception):
+            scale = float(geo.get("devicePixelRatio") or 1.0)
+        self._apply_os_geometry(cfg, scale=scale)
+        # Проверка результата после применения (окно могло не измениться).
         try:
-            from modules import os_window_control
-
-            applied = os_window_control.apply_geometry(
-                x=int(cfg.get("x", 0) or 0),
-                y=int(cfg.get("y", 0) or 0),
-                width=int(cfg["width"]),
-                height=int(cfg["height"]),
+            await asyncio.sleep(0.8)
+            geo2 = await asyncio.wait_for(
+                page.evaluate(self._GEOMETRY_JS),
+                timeout=WATCHDOG_TIMEOUT_SECONDS,
             )
-            log.info("os_window_control.apply_geometry -> %s", applied)
-        except ImportError as exc:
-            log.warning("os_window_control недоступен: %s", exc)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Принудительное применение геометрии не удалось: %s", exc)
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(geo2, dict):
+            return
+        still_off = (
+            abs(int(geo2.get("outerWidth") or 0) - int(cfg["width"])) > tolerance
+            or abs(int(geo2.get("outerHeight") or 0) - int(cfg["height"])) > tolerance
+        )
+        if not still_off:
+            self._geom_fail_streak = 0
+            self._geom_cooldown_until = 0.0
+            log.info("Watchdog: геометрия окна восстановлена (%sx%s)",
+                     geo2.get("outerWidth"), geo2.get("outerHeight"))
+            return
+        self._geom_fail_streak = getattr(self, "_geom_fail_streak", 0) + 1
+        if self._geom_fail_streak >= 2:
+            # Целевые размеры недостижимы в текущей среде (DPI/WM/полный
+            # экран пользователя). Прерываем «маятник» и замолкаем на 5 мин
+            # (ТЗ 7.7: логировать предупреждение, но не мешать работе).
+            self._geom_cooldown_until = time.monotonic() + 300
+            log.warning(
+                "Watchdog: окно НЕ удаётся привести к %sx%s (факт %sx%s, "
+                "scale=%s). Возможно влияние DPI-масштаба/WM. Повторная "
+                "попытка через 5 минут; проверьте config/window.json.",
+                cfg["width"], cfg["height"],
+                geo2.get("outerWidth"), geo2.get("outerHeight"), scale,
+            )
 
     async def watchdog(self) -> None:
         """
