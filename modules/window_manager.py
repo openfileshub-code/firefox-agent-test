@@ -87,6 +87,30 @@ class WindowManager:
             return {"width": width, "height": height}
         return None
 
+    def get_startup_geometry(self) -> Optional[Dict[str, int]]:
+        """Геометрия окна для применения ТОЛЬКО при открытии браузера.
+
+        Источник истины — фактические размеры/положение последнего запуска
+        (watchdog в режиме track записывает их сюда). Возвращает None, если
+        сохранённая геометрия невалидна или применение на старте отключено
+        (apply_at_startup=false).
+        """
+        if not self.config.get("apply_at_startup", True):
+            return None
+        try:
+            width = int(self.config.get("width") or 0)
+            height = int(self.config.get("height") or 0)
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        try:
+            x = int(self.config.get("x") or 0)
+            y = int(self.config.get("y") or 0)
+        except (TypeError, ValueError):
+            x = y = 0
+        return {"width": width, "height": height, "x": x, "y": y}
+
     def should_enforce_os_window(self) -> bool:
         """ТЗ 7.6: enforce_os_window + валидные размеры (headless — нет).
 
