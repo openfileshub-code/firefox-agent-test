@@ -890,9 +890,20 @@ class BrowserController:
         if wm is None or not wm.config.get("enforce_os_window"):
             return
         cfg = wm.config
+        # ТЗ 7.6: интервал надзора из конфига (watchdog_interval_seconds),
+        # дефолт — WATCHDOG_INTERVAL_SECONDS; не чаще дефолтного цикла.
+        try:
+            interval = int(cfg.get("watchdog_interval_seconds")
+                           or WATCHDOG_INTERVAL_SECONDS)
+        except (TypeError, ValueError):
+            interval = WATCHDOG_INTERVAL_SECONDS
+        interval = max(5, min(interval, WATCHDOG_INTERVAL_SECONDS))
         page = self._resolve_page()
         if page is None or self.headless:
             return
+        if time.monotonic() - getattr(self, "_last_geometry_check", 0.0) < interval:
+            return
+        self._last_geometry_check = time.monotonic()
         try:
             geo = await asyncio.wait_for(
                 page.evaluate(self._GEOMETRY_JS),

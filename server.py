@@ -46,6 +46,11 @@ TIMEOUTS = {
     "get_content": 30,
     "screenshot": 40,
     "eval": 25,
+    "schedule_action": 30,
+    "cancel_schedule": 15,
+    "list_schedules": 15,
+    "disable_radio": 90,
+    "save_to_playlist": 45,
     "default": 30,
 }
 
@@ -362,6 +367,11 @@ _COMMAND_TO_TOOL = {
     "video_action": "browser_video",
     "expand_menu": "browser_expand_menu",
     "context_get": "browser_get_context",
+    "schedule_action": "browser_schedule_action",
+    "cancel_schedule": "browser_cancel_schedule",
+    "list_schedules": "browser_list_schedules",
+    "disable_radio": "browser_video",
+    "save_to_playlist": "browser_video",
 }
 
 #: команды, чьи ответы наполняют BrowserContext
@@ -369,6 +379,7 @@ _CONTEXT_COMMANDS = {
     "navigate", "new_tab", "switch_tab", "tabs", "video_action",
     "context_get", "episode_next", "episode_prev", "episode_open",
     "episode_list", "click_text", "click_selector", "expand_menu",
+    "disable_radio", "save_to_playlist", "schedule_action",
 }
 
 
@@ -664,17 +675,30 @@ async def browser_video(
     theater_set (value/target: true|false — идемпотентно, changed:false
     при уже нужном режиме), layout_state (мультиканальный снимок режима
     с confidence/evidence),
+    disable_radio (ТЗ 5.3: выход из радио-микса — навигация на чистый
+    watch?v=<video_id>, возврат radio_mode/video_id/url),
+    save_to_playlist (ТЗ 5.5: value = имя плейлиста, по умолчанию
+    «Смотреть позже»; кнопка сохранения -> ожидание ytd-popup-container
+    -> клик по пункту -> подтверждение; видео не перезапускается),
     episode_list / episode_next / episode_prev / episode_open (нативная
     навигация по плейлисту через ytInitialData; value для episode_open —
     index или video_id), chapter_list / chapter_seek (главы описания;
     value для chapter_seek — индекс главы или время в секундах),
     next_video, toggle_chat_visibility, detect_login.
-    Действие state возвращает video_id/list_id/is_radio (RC11).
+    Действие state возвращает расширенный контекст (ТЗ 5.2): platform,
+    url, video_id, title, paused, currentTime, duration, volume, muted,
+    fullscreen, theater_mode, radio_mode, playlist_id, autoplay_upcoming;
+    при невозможности определить видео — video_id: null + warning.
     requestFullscreen через browser_eval заблокирован — для «широкого
     экрана» используйте theater_set/toggle_theater_mode.
 
     Поле value для volume принимает доли 0..1 либо проценты 0..100
-    (авто-нормализация). Действие 'state' возвращает расширенный статус:
+    (авто-нормализация: 0.35 / 35 / "35%" / "0.35" -> 35%). Canonicalный
+    параметр — value; target принимается только для обратной совместимости.
+    На YouTube громкость устанавливается через GUI-перетаскивание
+    ползунка с последующей верификацией и отводом курсора из плеера
+    (метод gui_slider_drag); native video.volume — fallback.
+    Действие 'state' возвращает расширенный статус:
     помимо fullscreen — theater_mode, full_window_mode, cinematics
     (для YouTube определяется по ytp-theater-mode / html5-theater-mode /
     классу theater; cinematics НЕ считается театральным режимом).
@@ -713,6 +737,82 @@ async def browser_video(
         "override_phrase": override_phrase,
     }
     return await call("video_action", params, guard_args=guard_args)
+
+
+@mcp.tool()
+async def browser_schedule_action(
+    trigger: str,
+    action: str = "navigate",
+    payload: Optional[Dict[str, Any]] = None,
+    expected_video_id: str = "",
+    scope: str = "current_tab",
+    options: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Запланировать действие на событие страницы — без цикла опроса ИИ.
+
+    Расписание исполняется на стороне демона/страницы (ТЗ 4.4, раздел 6):
+    триггер ждёт событие в DOM и мгновенно выполняет действие. Агент НЕ
+    должен поллить browser_video(state) в ожидании окончания видео.
+
+    Поддерживаемый триггер: video_ended (событие ended у <video>;
+    пауза/перемотка пользователем учитываются автоматически — переход
+    произойдёт только после фактического окончания).
+    Поддерживаемое действие: navigate (только http/https; javascript:,
+    file:, data: запрещены — NavigationBlocked).
+
+    Args:
+        trigger: 'video_ended'.
+        action: 'navigate' (по умолчанию).
+        payload: {'url': 'https://www.youtube.com/watch?v=TARGET_ID'}.
+        expected_video_id: привязка к текущему ролику; если к моменту
+            события видео сменилось (ручная смена / radio autoplay),
+            переход НЕ выполняется (state='skipped_context'). Пусто —
+            берётся video_id активного видео; если он неизвестен —
+            ValueRequired.
+        scope: 'current_tab' (иное значение пока не поддерживается).
+        options: {'once': true, 'cancel_on_user_navigation': true,
+            'verify_video_id': true, 'timeout_seconds': 0}.
+
+    Возвращает {'ok': true, 'schedule_id', 'trigger',
+    'expected_video_id', 'target_url', 'state': 'armed'}.
+    Состояния: armed -> fired | canceled | skipped_context | inactive
+    (закрытие вкладки). Список/статусы — browser_list_schedules.
+    """
+    params: Dict[str, Any] = {
+        "trigger": trigger,
+        "action": action,
+        "payload": payload or {},
+        "scope": scope,
+        "options": options or {},
+    }
+    if expected_video_id:
+        params["expected_video_id"] = expected_video_id
+    return await call("schedule_action", params,
+                      tool="browser_schedule_action")
+
+
+@mcp.tool()
+async def browser_cancel_schedule(schedule_id: str) -> dict:
+    """Отменить расписание browser_schedule_action (ТЗ 6.6).
+
+    Снимает слушателя со страницы и помечает расписание 'canceled';
+    переход не выполнится, даже если видео завершится после отмены.
+    Неизвестный schedule_id -> ScheduleNotFound (список —
+    browser_list_schedules).
+    """
+    return await call("cancel_schedule", {"schedule_id": schedule_id},
+                      tool="browser_cancel_schedule")
+
+
+@mcp.tool()
+async def browser_list_schedules() -> dict:
+    """Список всех расписаний с актуальными состояниями.
+
+    Перед ответом выполняется sweep: закрытые вкладки помечают свои
+    расписания 'inactive', зафиксированные срабатывания — 'fired'.
+    """
+    return await call("list_schedules", {},
+                      tool="browser_list_schedules")
 
 
 @mcp.tool()
