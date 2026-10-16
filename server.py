@@ -1123,5 +1123,127 @@ async def browser_reload_settings(path: str = "") -> dict:
     }
 
 
+# ---------------------------------------------------------------------
+# Пользовательские алиасы (личные имена вроде «мой джем»).
+# Хранятся ОТДЕЛЬНО от user_tool_settings.json — в config/user_aliases.json,
+# чтобы не ломать схему настроек политик (SKILL.md §Пользовательские алиасы).
+# ---------------------------------------------------------------------
+ALIASES_PATH = BASE_DIR / "config" / "user_aliases.json"
+
+
+def _load_aliases_file() -> dict:
+    """Читает user_aliases.json; битый/отсутствующий файл = пустое хранилище."""
+    try:
+        data = json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"version": "1.0", "aliases": {}}
+    except (json.JSONDecodeError, OSError):
+        log.warning("user_aliases.json повреждён — используем пустое "
+                    "хранилище алиасов")
+        return {"version": "1.0", "aliases": {}}
+    if not isinstance(data, dict) or not isinstance(
+            data.get("aliases"), dict):
+        return {"version": "1.0", "aliases": {}}
+    return data
+
+
+def _save_aliases_file(data: dict) -> None:
+    """Атомарная запись: temp-файл + os.replace (не частичный dump)."""
+    ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ALIASES_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, ALIASES_PATH)
+
+
+@mcp.tool()
+async def browser_save_alias(alias_name: str, target_url: str = "",
+                             search_query: str = "") -> dict:
+    """Сохранить пользовательский ярлык (алиас) в config/user_aliases.json.
+
+    Алиас — личное имя пользователя для ссылки или поискового запроса
+    («мой джем» → конкретное видео/плейлист). Дописывает отдельный файл,
+    НЕ трогая user_tool_settings.json и его схему.
+
+    Правила (SKILL.md §Пользовательские алиасы): сохраняй только с явного
+    согласия пользователя; при следующем «открой <имя>» сначала смотри
+    browser_list_aliases. Нужен хотя бы один из target_url / search_query.
+    """
+    name = (alias_name or "").strip().lower()
+    url = (target_url or "").strip()
+    query = (search_query or "").strip()
+    if not name:
+        return {"ok": False, "error_code": "ALIAS_NAME_REQUIRED",
+                "message": "alias_name не может быть пустым."}
+    if not url and not query:
+        return {"ok": False, "error_code": "ALIAS_TARGET_REQUIRED",
+                "message": "Укажите target_url или search_query для алиаса "
+                           "'%s'." % name}
+    if url:
+        if uv.is_placeholder_url(url):
+            return {"ok": False,
+                    "error_code": "POLICY_PLACEHOLDER_URL_FORBIDDEN",
+                    "message": "Placeholder-URL нельзя сохранить как алиас: "
+                               "%s" % url}
+        if uv.is_search_results_url(url):
+            return {"ok": False,
+                    "error_code": "POLICY_SITE_SEARCH_NOT_REQUESTED",
+                    "message": "URL поисковой выдачи нельзя сохранять как "
+                               "алиас; сохраните точный search_query вместо "
+                               "него."}
+    data = _load_aliases_file()
+    existed = name in data["aliases"]
+    data["aliases"][name] = {
+        "target_url": url,
+        "search_query": query,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    try:
+        _save_aliases_file(data)
+    except OSError as exc:
+        return {"ok": False, "error_code": "ALIAS_WRITE_FAILED",
+                "message": "Не удалось записать %s: %s" % (ALIASES_PATH, exc)}
+    return {"ok": True, "alias_name": name, "existed": existed,
+            "path": str(ALIASES_PATH),
+            "target_url": url, "search_query": query}
+
+
+@mcp.tool()
+async def browser_list_aliases() -> dict:
+    """Список сохранённых пользовательских алиасов (config/user_aliases.json).
+
+    Возвращает aliases: [{alias_name, target_url, search_query, updated_at}].
+    Используй перед попытками найти «личное имя» пользователя на странице.
+    """
+    data = _load_aliases_file()
+    items = [{"alias_name": k,
+              "target_url": v.get("target_url", ""),
+              "search_query": v.get("search_query", ""),
+              "updated_at": v.get("updated_at", "")}
+             for k, v in sorted(data["aliases"].items())]
+    return {"ok": True, "count": len(items), "aliases": items,
+            "path": str(ALIASES_PATH)}
+
+
+@mcp.tool()
+async def browser_delete_alias(alias_name: str) -> dict:
+    """Удалить пользовательский алиас из config/user_aliases.json."""
+    name = (alias_name or "").strip().lower()
+    if not name:
+        return {"ok": False, "error_code": "ALIAS_NAME_REQUIRED",
+                "message": "alias_name не может быть пустым."}
+    data = _load_aliases_file()
+    if name not in data["aliases"]:
+        return {"ok": False, "error_code": "ALIAS_NOT_FOUND",
+                "message": "Алиас '%s' не найден." % name}
+    del data["aliases"][name]
+    try:
+        _save_aliases_file(data)
+    except OSError as exc:
+        return {"ok": False, "error_code": "ALIAS_WRITE_FAILED",
+                "message": "Не удалось записать %s: %s" % (ALIASES_PATH, exc)}
+    return {"ok": True, "deleted": name, "path": str(ALIASES_PATH)}
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

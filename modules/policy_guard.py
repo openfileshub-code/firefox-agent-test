@@ -342,13 +342,23 @@ class PolicyGuard:
             if not s.phrase_matches("allow_site_search",
                                     args.get("override_phrase")) \
                     and not args.get("allow_site_search"):
+                # Формат отказа (контракт с LLM-агентом): императив в
+                # message + browser_find_link ПЕРВЫМ в suggestions.
+                # Агент обязан немедленно выполнить первое
+                # suggested_safe_action; повтор заблокированного вызова
+                # запрещён (см. SKILL.md §Обработка отказов PolicyGuard).
                 return _deny(
                     "POLICY_SITE_SEARCH_NOT_REQUESTED", tool, args,
-                    message="Переход на URL выдачи = site-search без запроса "
-                            "пользователя. Ищите на текущей странице.",
-                    suggestions=[{"tool": "browser_search_on_page",
+                    message="ОШИБКА: Конструирование URL поиска запрещено! "
+                            "Немедленно вызови browser_find_link с аргументом "
+                            "pattern=\"%s\", чтобы найти элемент на текущей "
+                            "странице. Запрещено повторять этот заблокированный "
+                            "вызов и запрещено сдаваться — выполни первое "
+                            "действие из suggested_safe_actions."
+                            % _query_from(url),
+                    suggestions=[{"tool": "browser_find_link",
                                   "args": {"pattern": _query_from(url)}},
-                                 {"tool": "browser_find_link",
+                                 {"tool": "browser_search_on_page",
                                   "args": {"pattern": _query_from(url)}}])
         vid = uv.extract_youtube_video_id(url)
         if vid is not None and url.lower().find("youtu") >= 0:
