@@ -250,14 +250,31 @@ class PolicyGuard:
                              {"tool": "browser_find_link",
                               "args": {"pattern": ""}}],
                 confirmation=True)
+        # Автономный recovery (см. SKILL.md §«Пользователь просит открыть
+        # сайт»): «открой <сайт>» — это навигация в ТЕКУЩЕЙ вкладке, а не
+        # запрос новой. Поэтому прямой browser_navigate(url) предлагается
+        # первым и помечается как auto_retry: агент обязан выполнить его
+        # немедленно в том же ходе, без переспрашивания пользователя.
+        nav_suggestion = None
+        url_arg = str(args.get("url") or "")
+        if url_arg.startswith(("http://", "https://")):
+            nav_suggestion = {
+                "tool": "browser_navigate",
+                "args": {"url": url_arg, "new_tab": False},
+                "auto_retry": True,
+            }
+        suggestions = ([] if nav_suggestion is None else [nav_suggestion]) + [
+            {"tool": "browser_find_link", "args": {"pattern": ""}},
+            {"tool": "browser_search_on_page", "args": {"pattern": ""}},
+        ]
         return _deny(
             "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
             message="Новая вкладка запрещена: работайте в текущей вкладке. "
-                    "Разрешение — только по явной фразе пользователя.",
-            suggestions=[{"tool": "browser_find_link",
-                          "args": {"pattern": ""}},
-                         {"tool": "browser_search_on_page",
-                          "args": {"pattern": ""}}],
+                    "Разрешение — только по явной фразе пользователя. "
+                    "Если пользователь сказал просто «открой <сайт>» — "
+                    "немедленно повтори операцию через browser_navigate "
+                    "в текущей вкладке (см. suggestion с auto_retry).",
+            suggestions=suggestions,
             confirmation=True)
 
     # ------------------------------------------------------------------
