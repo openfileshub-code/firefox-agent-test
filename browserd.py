@@ -35,7 +35,8 @@ from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_PROFILE = BASE_DIR / "playwright_profile"
-LOG_FILE = BASE_DIR / "browserd.log"
+LOGS_DIR = BASE_DIR / "logs"
+LOG_FILE = LOGS_DIR / "browserd.log"
 
 # Должно совпадать с server.py.
 PROTOCOL_VERSION = 5
@@ -87,6 +88,7 @@ def make_logger() -> logging.Logger:
 
     if not logger.handlers:
         try:
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
             handler = RotatingFileHandler(
                 LOG_FILE,
                 maxBytes=10 * 1024 * 1024,

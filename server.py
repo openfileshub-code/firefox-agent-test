@@ -80,8 +80,9 @@ def _make_logger():
     result.propagate = False
     if not result.handlers:
         try:
+            (BASE_DIR / "logs").mkdir(parents=True, exist_ok=True)
             handler = RotatingFileHandler(
-                BASE_DIR / "mcp_debug.log",
+                BASE_DIR / "logs" / "mcp_debug.log",
                 maxBytes=5 * 1024 * 1024,
                 backupCount=3,
                 encoding="utf-8",

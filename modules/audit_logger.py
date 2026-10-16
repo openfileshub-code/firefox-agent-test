@@ -36,6 +36,12 @@ class AuditLogger:
         self.enabled = enabled
         self._lock = threading.Lock()
 
+    def _ensure_dir(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # noqa: BLE001
+            log.warning("audit dir create failed: %s", exc)
+
     def _rotate_if_needed(self) -> None:
         try:
             if self.path.exists() and self.path.stat().st_size > MAX_BYTES:
@@ -74,7 +80,7 @@ class AuditLogger:
         }
         try:
             with self._lock:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._ensure_dir()
                 self._rotate_if_needed()
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")

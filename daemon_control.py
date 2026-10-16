@@ -14,7 +14,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "playwright_profile"
 STATE_FILE = PROFILE_DIR / ".browserd_state.json"
 DAEMON_FILE = BASE_DIR / "browserd.py"
-LOG_FILE = BASE_DIR / "daemon_control.log"
+LOGS_DIR = BASE_DIR / "logs"
+LOG_FILE = LOGS_DIR / "daemon_control.log"
 
 PYTHON = BASE_DIR / ".venv" / "Scripts" / "python.exe"
 PYTHONW = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
@@ -56,6 +57,7 @@ def _is_newer_state(state) -> bool:
 
 def log(message: str) -> None:
     try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         with open(LOG_FILE, "a", encoding="utf-8") as stream:
             stream.write(
                 time.strftime("%Y-%m-%d %H:%M:%S ")
