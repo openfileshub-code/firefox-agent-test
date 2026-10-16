@@ -420,6 +420,9 @@ class PolicyGuard:
                   "theater_on": "theater_set",
                   "theater_off": "theater_set"}.get(action, action)
 
+        if action == "fullscreen_enter":
+            return ALLOW  # ТЗ 5.4: штатное действие, алиасы requestFullscreen
+
         if action in ("theater_on", "theater_off", "wide_mode",
                       "default_size", "video_check", "browser_snapshot",
                       "quality_set", "cleanup", "download_source"):

@@ -242,6 +242,17 @@ class BrowserController:
         self.forms = None
         self.websocket_monitor = None
 
+        # Событийные расписания (ТЗ 4.4): schedule_id -> запись.
+        self._schedules: dict[str, dict[str, Any]] = {}
+
+        try:
+            from modules.window_manager import WindowManager
+
+            self.window_manager = WindowManager()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("WindowManager недоступен: %s", exc)
+            self.window_manager = None
+
     @property
     def pages(self) -> list[Any]:
         try:
@@ -322,11 +333,32 @@ class BrowserController:
                 f"Импорт camoufox.async_api завершился ошибкой: {exc}"
             ) from exc
 
-        self.cm = AsyncCamoufox(
-            headless=self.headless,
-            persistent_context=True,
-            user_data_dir=str(self.profile_dir),
-        )
+        # ТЗ 7.3 (запускной уровень): viewport из config/window.json.
+        # Если use_viewport=false или конфиг битый — get_viewport()
+        # возвращает None и Camoufox использует свой дефолт.
+        launch_kwargs: dict[str, Any] = {
+            "headless": self.headless,
+            "persistent_context": True,
+            "user_data_dir": str(self.profile_dir),
+        }
+        viewport = None
+        if self.window_manager is not None:
+            with contextlib.suppress(Exception):
+                viewport = self.window_manager.get_viewport()
+        if isinstance(viewport, dict) and viewport.get("width") \
+                and viewport.get("height"):
+            launch_kwargs["viewport"] = viewport
+            log.info("Применён viewport из конфига: %sx%s",
+                     viewport["width"], viewport["height"])
+
+        try:
+            self.cm = AsyncCamoufox(**launch_kwargs)
+        except TypeError:
+            # Старые версии Camoufox могут не принимать viewport —
+            # деградируем к запуску без него, но не падаем (ТЗ 7.7).
+            log.warning("AsyncCamoufox не принимает viewport; запускаю без него")
+            launch_kwargs.pop("viewport", None)
+            self.cm = AsyncCamoufox(**launch_kwargs)
 
         try:
             # В режиме persistent_context ожидается BrowserContext.
@@ -486,6 +518,99 @@ class BrowserController:
 
     async def _on_page_closed(self) -> None:
         await self.push_tabs()
+
+    #: Событийная ловушка (ТЗ 4.4/6.2): переживает навигацию страницы —
+    #: page.add_init_script выполняется в каждом новом документе; когда
+    #: страница загружается и video_id совпадает с expected, вызывается
+    #: window.__agentVideoTrapFired().
+    _TRAP_INIT_JS = r"""
+(() => {
+  if (window.__browserdTrapInitInstalled) return;
+  window.__browserdTrapInitInstalled = true;
+  const cfgs = window.__browserdTraps = window.__browserdTraps || [];
+  const getCurrentVideoId = () => {
+    try {
+      const pr = window.ytInitialPlayerResponse;
+      if (pr && pr.videoDetails && pr.videoDetails.videoId)
+        return pr.videoDetails.videoId;
+    } catch (e) {}
+    try {
+      const mp = document.querySelector('#movie_player');
+      if (mp && typeof mp.getVideoData === 'function')
+        return (mp.getVideoData() || {}).video_id || null;
+    } catch (e) {}
+    const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+    return m ? m[1] : null;
+  };
+  const check = () => {
+    const currentId = getCurrentVideoId();
+    for (const cfg of cfgs) {
+      if (cfg.done) continue;
+      // Триггер video_ended срабатывает только по событию ended,
+      // не при загрузке документа.
+      if (cfg.trigger === 'video_ended') continue;
+      if (cfg.verify_video_id && cfg.expected_video_id &&
+          currentId && currentId !== cfg.expected_video_id) {
+        cfg.done = true;   // видео сменилось пользователем — trap не нужен
+        (window.__browserdTrapLog = window.__browserdTrapLog || []).push(
+          {schedule_id: cfg.schedule_id, state: 'skipped_context',
+           at: Date.now()});
+        continue;
+      }
+      cfg.done = true;
+      (window.__browserdTrapLog = window.__browserdTrapLog || []).push(
+        {schedule_id: cfg.schedule_id, state: 'fired',
+         from_video_id: currentId, to_url: cfg.target_url, at: Date.now()});
+      try {
+        if (typeof window.__agentVideoTrapFired === 'function') {
+          window.__agentVideoTrapFired({
+            schedule_id: cfg.schedule_id, trigger: cfg.trigger,
+            action: cfg.action, payload: cfg.payload,
+            from_video_id: currentId});
+        }
+      } catch (e) {}
+    }
+  };
+  window.__browserdTrapCheck = check;
+  window.addEventListener('__browserdTrapCheck', check);
+  if (document.readyState === 'complete' ||
+      document.readyState === 'interactive') {
+    setTimeout(check, 50);
+  } else {
+    window.addEventListener('load', () => setTimeout(check, 50), {once: true});
+  }
+})();
+"""
+
+    async def _arm_init_trap(self, page: Any, cfg: dict[str, Any]) -> bool:
+        """Ставит init-скрипт ловушки на страницу (ТЗ 6.2)."""
+        ok = False
+        with contextlib.suppress(Exception):
+            await page.add_init_script(self._TRAP_INIT_JS)
+            ok = True
+        with contextlib.suppress(Exception):
+            await page.evaluate(r"""
+            (cfg) => {
+              window.__browserdTraps = window.__browserdTraps || [];
+              if (!window.__browserdTraps.some(x => x.schedule_id ===
+                  cfg.schedule_id)) {
+                window.__browserdTraps.push(cfg);
+              }
+            }
+            """, cfg)
+        # Если документ уже загружен — проверяем немедленно (ТЗ 6.4 шаг 3:
+        # страница может быть открытой и готовой к моменту установки).
+        with contextlib.suppress(Exception):
+            await page.evaluate(r"""
+            () => {
+              if (document.readyState === 'complete' ||
+                  document.readyState === 'interactive') {
+                setTimeout(() => window.dispatchEvent(
+                  new CustomEvent('__browserdTrapCheck')), 50);
+              }
+            }
+            """)
+        return ok
 
     def _on_frame_navigated(self, frame: Any) -> None:
         try:
@@ -743,6 +868,63 @@ class BrowserController:
             self.state.clear()
             self._stop_event.set()
 
+    _GEOMETRY_JS = r"""
+    () => ({
+      outerWidth: window.outerWidth,
+      outerHeight: window.outerHeight,
+      screenX: window.screenX,
+      screenY: window.screenY,
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight
+    })
+    """
+
+    async def _check_window_geometry(self) -> None:
+        """Надзорный уровень геометрии (ТЗ 7.5).
+
+        Сравнивает фактические размеры окна/viewport с config/window.json;
+        при отклонении за порог вызывает os_window_control.apply_geometry().
+        Ошибки никогда не роняют watchdog (ТЗ 7.7).
+        """
+        wm = getattr(self, "window_manager", None)
+        if wm is None or not wm.config.get("enforce_os_window"):
+            return
+        cfg = wm.config
+        page = self._resolve_page()
+        if page is None or self.headless:
+            return
+        try:
+            geo = await asyncio.wait_for(
+                page.evaluate(self._GEOMETRY_JS),
+                timeout=WATCHDOG_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(geo, dict):
+            return
+        tolerance = int(cfg.get("tolerance_px", 10) or 10)
+        drift = abs(int(geo.get("outerWidth") or 0) - int(cfg["width"])) > tolerance \
+            or abs(int(geo.get("outerHeight") or 0) - int(cfg["height"])) > tolerance \
+            or abs(int(geo.get("screenX") or 0) - int(cfg.get("x", 0) or 0)) > 5 \
+            or abs(int(geo.get("screenY") or 0) - int(cfg.get("y", 0) or 0)) > 5
+        if not drift:
+            return
+        log.info("Watchdog: окно смещено (%s), применяю геометрию из конфига", geo)
+        try:
+            from modules import os_window_control
+
+            applied = os_window_control.apply_geometry(
+                x=int(cfg.get("x", 0) or 0),
+                y=int(cfg.get("y", 0) or 0),
+                width=int(cfg["width"]),
+                height=int(cfg["height"]),
+            )
+            log.info("os_window_control.apply_geometry -> %s", applied)
+        except ImportError as exc:
+            log.warning("os_window_control недоступен: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Принудительное применение геометрии не удалось: %s", exc)
+
     async def watchdog(self) -> None:
         """
         Диагностическая проверка. Ошибки меняют state на degraded,
@@ -771,6 +953,12 @@ class BrowserController:
                     self._watchdog_failures,
                     exc,
                 )
+
+            with contextlib.suppress(Exception):
+                await self._check_window_geometry()
+
+            with contextlib.suppress(Exception):
+                await self._sweep_schedules()
 
             status = (
                 "degraded"
@@ -1905,11 +2093,17 @@ class BrowserController:
     #: ВАЖНО: set_theater/wide_mode/theater_on/theater_off — это НЕ toggle,
     #: а идемпотентный theater_set (RC7): повторный запрос того же режима
     #: не должен менять состояние.
+    #: Алиасы действий (ТЗ 5.4): requestFullscreen/enterFullscreen ->
+    #: fullscreen_enter; theater-алиасы -> toggle_theater_mode.
     _VIDEO_ACTION_ALIASES = {
         "theater_toggle": "toggle_theater_mode",
         "toggle_theater": "toggle_theater_mode",
         "theater_mode": "toggle_theater_mode",
         "theater": "toggle_theater_mode",
+        "requestfullscreen": "fullscreen_enter",
+        "enterfullscreen": "fullscreen_enter",
+        "fullscreen": "fullscreen_enter",
+        "exitfullscreen": "fullscreen_exit",
         "set_theater": "theater_set",
         "wide_mode": "theater_set",
         "theater_on": "theater_set",
@@ -1921,10 +2115,41 @@ class BrowserController:
     _EPISODE_ACTIONS = {"episode_list", "episode_next", "episode_prev",
                         "episode_open", "chapter_list", "chapter_seek"}
 
+    @staticmethod
+    def _normalize_volume_value(value: Any) -> tuple[float | None, str | None]:
+        """Нормализация аргумента громкости (ТЗ 4.2).
+
+        Принимает доли 0..1, проценты 0..100, строки '35' / '35%' / '0.35'.
+        Возвращает (доля_0_1, None) при успехе или (None, код_ошибки):
+        'ValueRequired' — значение отсутствует/нечисловое,
+        'ValueOutOfRange' — число вне 0..100.
+        """
+        if value is None:
+            return None, "ValueRequired"
+        if isinstance(value, bool):
+            return None, "ValueRequired"
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            raw = str(value).strip().rstrip("%").replace(",", ".")
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                return None, "ValueRequired"
+        if not math.isfinite(number) or number < 0 or number > 100:
+            return None, "ValueOutOfRange"
+        if number > 1.0:
+            number /= 100.0
+        return max(0.0, min(1.0, number)), None
+
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         action = str(params.get("action") or "").strip().lower()
+        # ТЗ 4.2: canonical-параметр — value; target принимается для
+        # обратной совместимости и внутренне преобразуется в value.
         value = params.get("value")
+        if value is None and params.get("target") is not None:
+            value = params.get("target")
 
         if not action:
             return {"ok": False, "error": "Действие с видео не задано"}
@@ -1936,6 +2161,89 @@ class BrowserController:
                 value = True
             elif low in ("false", "0", "off", "выключить", "нет"):
                 value = False
+
+        # ТЗ 4.2: явная нормализация громкости ДО маршрутизации адаптера —
+        # понятная ошибка вместо ValueRequired внутри адаптера.
+        if action in ("volume_set", "volume", "set_volume"):
+            norm, err = self._normalize_volume_value(value)
+            if err:
+                return {
+                    "ok": False,
+                    "error": err,
+                    "message": (
+                        "volume_set требует числовое значение: доля 0..1 "
+                        "или проценты 0..100 (например 0.35 или 35)."
+                        if err == "ValueRequired" else
+                        "Значение громкости вне диапазона 0..100."
+                    ),
+                    "hint": "browser_video action=\"volume_set\" value=35",
+                }
+            value = norm
+            # Приоритет GUI-слайдера (ТЗ 5.1): если адаптер умеет
+            # set_volume_gui, пробуем его первым; native-путь остаётся
+            # fallback внутри адаптера.
+            try:
+                from adapters.registry import get_adapter as _get_adapter
+
+                _adapter = _get_adapter(
+                    page,
+                    page_url=getattr(page, "url", "") or None,
+                    page_dom_sample=await self._collect_dom_sample(page),
+                    video_controller=self.video_controller,
+                )
+                if type(_adapter).__name__ != "GenericHTML5Adapter" and \
+                        hasattr(_adapter, "set_volume_gui"):
+                    gui_result = await _adapter.set_volume_gui(norm * 100.0)
+                    if isinstance(gui_result, dict) and \
+                            gui_result.get("verified"):
+                        gui_result.setdefault("platform", _adapter.platform)
+                        return gui_result
+                    result = await _adapter.set_volume(norm)
+                    if isinstance(result, dict):
+                        result.setdefault("platform", _adapter.platform)
+                        return result
+            except ImportError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("GUI volume путь не удался, fallback: %s", exc)
+
+        # ТЗ 5.3: режимы обработки контекста видео strict/adaptive/off.
+        context_mode = str(params.get("context_mode") or "").strip().lower()
+        expected_id = str(params.get("expected_video_id") or "").strip()
+        if not context_mode:
+            # Дефолт по типу действия (ТЗ 3.4/5.3).
+            context_mode = ("strict" if (expected_id or action in (
+                "seek", "seek_to", "save_to_playlist")) else
+                ("adaptive" if action in (
+                    "play", "pause", "volume_set", "volume", "set_volume",
+                    "mute", "unmute", "toggle_mute") else "off"))
+        if context_mode == "strict" and expected_id:
+            actual_id = None
+            with contextlib.suppress(Exception):
+                actual_id = await page.evaluate(r"""
+                () => {
+                  try {
+                    const mp = document.querySelector('#movie_player');
+                    if (mp && typeof mp.getVideoData === 'function')
+                      return (mp.getVideoData() || {}).video_id || null;
+                  } catch (e) {}
+                  const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+                  return m ? m[1] : null;
+                }
+                """)
+            if actual_id and actual_id != expected_id:
+                return {
+                    "ok": False,
+                    "error": "VIDEO_CONTEXT_CHANGED",
+                    "message": (
+                        "Видео сменилось до выполнения действия "
+                        "(ожідалось %s, фактически %s) — вероятно, "
+                        "radio autoplay." % (expected_id, actual_id)),
+                    "hint": "browser_video action=\"disable_radio\" либо "
+                            "повторно откройте нужное видео.",
+                    "details": {"expected_video_id": expected_id,
+                                "actual_video_id": actual_id},
+                }
 
         action = self._VIDEO_ACTION_ALIASES.get(action, action)
 
@@ -1958,13 +2266,9 @@ class BrowserController:
             if action == "chapter_seek":
                 return await self.cmd_chapter_seek(ep_params)
 
-        # Системная правка №7: «сброс громкости» — это YouTube-фича
-        # (после v/volume_up/volume_down плеер возвращает сохранённую
-        # пользователем громкость), а не HTML5-поведение. Прямое
-        # v.volume=... при этом конфликтует с youtubewebembed и
-        # yt-cinematics, которые перехватывают атрибут volume и
-        # переписывают его обратно. Поэтому для платформенных
-        # адаптеров volume_set идёт отдельным защищённым путём.
+        # Системная правка №7 + ТЗ 4.2/5.1: громкость уже нормализована и
+        # обработана (GUI/native) выше, до aliases-маршрутизации. Сюда
+        # доходят только generic-адаптеры без set_volume_gui.
         if action in ("volume_set", "volume", "set_volume"):
             try:
                 from adapters.registry import get_adapter as _get_adapter
@@ -2041,6 +2345,530 @@ class BrowserController:
         return {
             "ok": False,
             "error": "VideoController не загружен",
+        }
+
+    # ------------------------------------------------------------------
+    # ТЗ 5.3: отключение радио-режима YouTube
+    # ------------------------------------------------------------------
+    async def cmd_disable_radio(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        info = await page.evaluate(r"""
+        () => {
+          const out = {video_id: null, radio: false, url: location.href};
+          try {
+            const mp = document.querySelector('#movie_player');
+            if (mp && typeof mp.getVideoData === 'function')
+              out.video_id = (mp.getVideoData() || {}).video_id || null;
+          } catch (e) {}
+          if (!out.video_id) {
+            const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+            if (m) out.video_id = m[1];
+          }
+          if (/[?&]list=RD[A-Za-z0-9_-]+/.test(location.href)) out.radio = true;
+          if (/[?&]start_radio=1/.test(location.href)) out.radio = true;
+          return out;
+        }
+        """)
+        video_id = (info or {}).get("video_id")
+        if not video_id:
+            return {
+                "ok": False,
+                "error": "ElementNotFound",
+                "message": "Не удалось определить video_id текущей страницы.",
+                "hint": "browser_video action=\"state\" для диагностики.",
+            }
+        clean_url = "https://www.youtube.com/watch?v=" + video_id
+        nav = await self.cmd_navigate({"url": clean_url})
+        if not nav.get("ok"):
+            return nav
+        after = await page.evaluate(r"""
+        () => ({
+          radio_params: /[?&](list=RD|start_radio=1)/.test(location.href),
+          url: location.href
+        })
+        """)
+        radio_gone = not (after or {}).get("radio_params")
+        log.info("disable_radio: video_id=%s radio_gone=%s", video_id, radio_gone)
+        return {
+            "ok": bool(radio_gone),
+            "action": "disable_radio",
+            "radio_mode": not radio_gone,
+            "video_id": video_id,
+            "url": (after or {}).get("url", clean_url),
+            "error": None if radio_gone else "ActionNotConfirmed",
+        }
+
+    # ------------------------------------------------------------------
+    # ТЗ 5.5: сохранение видео в плейлист («Смотреть позже» и др.)
+    # ------------------------------------------------------------------
+    _SAVE_MENU_WAIT_JS = r"""
+    async (ms) => {
+      const sels = ['ytd-popup-container',
+                    'ytd-playlist-add-to-option-renderer',
+                    '[role="dialog"]'];
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        for (const s of sels) {
+          const el = document.querySelector(s);
+          if (el && el.offsetParent !== null) return true;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return false;
+    }
+    """
+
+    async def cmd_save_to_playlist(self, params: dict[str, Any]) -> dict[str, Any]:
+        page = await self.require_page(params)
+        payload = params.get("payload") or {}
+        playlist = str(payload.get("playlist")
+                       or params.get("value") or "Смотреть позже").strip()
+
+        expected_id = str(params.get("expected_video_id") or "").strip()
+        before_id = None
+        with contextlib.suppress(Exception):
+            before_id = await page.evaluate(r"""
+            () => {
+              try {
+                const pr = window.ytInitialPlayerResponse;
+                if (pr && pr.videoDetails) return pr.videoDetails.videoId || null;
+              } catch (e) {}
+              const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+              return m ? m[1] : null;
+            }
+            """)
+        if expected_id and before_id and expected_id != before_id:
+            return {
+                "ok": False,
+                "error": "VIDEO_CONTEXT_CHANGED",
+                "message": "Видео сменилось до сохранения.",
+                "details": {"expected": expected_id, "actual": before_id},
+            }
+
+        save_btn = None
+        for label in ("Сохранить", "Save"):
+            locator = page.locator(
+                f'button[aria-label*="{label}"], [role="button"][aria-label*="{label}"]'
+            ).first
+            try:
+                await locator.wait_for(state="visible", timeout=2000)
+                save_btn = locator
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if save_btn is None:
+            return {
+                "ok": False,
+                "error": "ElementNotFound",
+                "message": f"Кнопка сохранения не найдена (плейлист: {playlist!r}).",
+                "hint": "browser_screenshot / дождитесь загрузки страницы.",
+            }
+
+        click_result = await self._safe_click(save_btn, 8000, "save-button")
+        if not click_result.get("ok"):
+            return click_result
+
+        menu_ok = False
+        with contextlib.suppress(Exception):
+            menu_ok = bool(await page.evaluate(self._SAVE_MENU_WAIT_JS, 5000))
+        if not menu_ok:
+            return {
+                "ok": False,
+                "error": "ElementNotFound",
+                "message": "Меню «Сохранить в плейлист» не появилось за 5 сек.",
+                "hint": "Diagnostic snapshot: "
+                        + json.dumps({
+                            "url": getattr(page, "url", ""),
+                            "popup": bool(await page.query_selector(
+                                "ytd-popup-container"))
+                        }, ensure_ascii=False),
+            }
+
+        item_texts = [playlist]
+        if playlist in ("Смотреть позже", "Watch later"):
+            item_texts = ["Смотреть позже", "Watch later"]
+        picked = None
+        for text in item_texts:
+            item = page.locator(
+                'ytd-playlist-add-to-option-renderer, ytd-popup-container '
+                '[role="menuitem"], ytd-popup-container li, [role="dialog"] li'
+            ).filter(has_text=text).first
+            try:
+                await item.wait_for(state="visible", timeout=1500)
+                picked = item
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if picked is None:
+            with contextlib.suppress(Exception):
+                await page.keyboard.press("Escape")
+            return {
+                "ok": False,
+                "error": "ElementNotFound",
+                "message": f"Плейлист {playlist!r} не найден в меню сохранения.",
+                "hint": "Проверьте точное имя плейлиста на странице.",
+            }
+
+        click_result = await self._safe_click(picked, 8000, f"playlist={playlist}")
+        if not click_result.get("ok"):
+            return click_result
+
+        confirmed = True
+        with contextlib.suppress(Exception):
+            still_open = await page.evaluate(
+                "() => !!document.querySelector("
+                "'ytd-playlist-add-to-option-renderer')")
+            confirmed = not still_open
+
+        after_id = before_id
+        with contextlib.suppress(Exception):
+            after_id = await page.evaluate(r"""
+            () => {
+              try {
+                const pr = window.ytInitialPlayerResponse;
+                if (pr && pr.videoDetails) return pr.videoDetails.videoId || null;
+              } catch (e) {}
+              const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+              return m ? m[1] : null;
+            }
+            """)
+        video_restarted = bool(before_id and after_id and before_id != after_id)
+        log.info("save_to_playlist: %s confirmed=%s restarted=%s",
+                 playlist, confirmed, video_restarted)
+        return {
+            "ok": True,
+            "action": "save_to_playlist",
+            "saved": True,
+            "playlist": playlist,
+            "confirmed_by_ui": confirmed,
+            "video_id": after_id,
+            "video_restarted": video_restarted,
+        }
+
+    # ------------------------------------------------------------------
+    # ТЗ 4.4 / раздел 6: событийные расписания (browser_schedule_action)
+    # ------------------------------------------------------------------
+    _SCHEDULE_TRIGGERS = {"video_ended", "time_reached", "page_loaded"}
+    _SAFE_URL_SCHEMES = ("http://", "https://")
+
+    _TRAP_JS_TEMPLATE = r"""
+    (cfg) => {
+      const NS = '__browserdTrap_' + cfg.schedule_id;
+      const w = window;
+      if (w[NS]) return 'already';
+      w[NS] = true;
+      w.__browserdTrapLog = w.__browserdTrapLog || [];
+      const getCurrentVideoId = () => {
+        try {
+          const pr = w.ytInitialPlayerResponse;
+          if (pr && pr.videoDetails && pr.videoDetails.videoId)
+            return pr.videoDetails.videoId;
+        } catch (e) {}
+        try {
+          const mp = document.querySelector('#movie_player');
+          if (mp && typeof mp.getVideoData === 'function')
+            return (mp.getVideoData() || {}).video_id || null;
+        } catch (e) {}
+        const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+        return m ? m[1] : null;
+      };
+      const fire = () => {
+        if (w[NS + '_fired']) return;
+        const currentId = getCurrentVideoId();
+        if (cfg.verify_video_id && cfg.expected_video_id &&
+            currentId && currentId !== cfg.expected_video_id) {
+          w.__browserdTrapLog.push({schedule_id: cfg.schedule_id,
+                                    state: 'skipped_context', at: Date.now()});
+          return;
+        }
+        w[NS + '_fired'] = true;
+        w.__agentVideoTrapFired = true;
+        w.__browserdTrapLog.push({schedule_id: cfg.schedule_id,
+                                  state: 'fired', from_video_id: currentId,
+                                  to_url: cfg.target_url, at: Date.now()});
+        if (cfg.action === 'navigate') {
+          window.location.replace(cfg.target_url);
+        }
+      };
+      const attach = () => {
+        const v = document.querySelector('video');
+        if (!v) { setTimeout(attach, 300); return; }
+        v.addEventListener('ended', fire, {once: true});
+        // Компенсация задержки рендеринга: подготовка навигации за ~0.15с.
+        v.addEventListener('timeupdate', () => {
+          if (!v.paused && Number.isFinite(v.duration) &&
+              v.duration - v.currentTime <= 0.15) {
+            try {
+              const link = document.createElement('link');
+              const u = new URL(cfg.target_url);
+              link.rel = 'preconnect';
+              link.href = u.protocol + '//' + u.host;
+              document.head.appendChild(link);
+            } catch (e) {}
+          }
+        });
+        if (cfg.trigger === 'time_reached') {
+          v.addEventListener('timeupdate', () => {
+            if (v.currentTime >= cfg.at_time) fire();
+          });
+        }
+      };
+      if (cfg.trigger === 'page_loaded') {
+        if (document.readyState === 'complete') fire();
+        else window.addEventListener('load', fire, {once: true});
+      } else {
+        attach();
+      }
+      return 'armed';
+    }
+    """
+
+    async def cmd_schedule_action(self, params: dict[str, Any]) -> dict[str, Any]:
+        trigger = str(params.get("trigger") or "").strip().lower()
+        action = str(params.get("action") or "").strip().lower()
+        payload = params.get("payload") or {}
+        options = params.get("options") or {}
+        scope = str(params.get("scope") or "current_tab")
+        expected_video_id = str(params.get("expected_video_id") or "").strip()
+
+        if trigger not in self._SCHEDULE_TRIGGERS:
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": (f"Неподдерживаемый trigger {trigger!r}. "
+                            f"Допустимо: {sorted(self._SCHEDULE_TRIGGERS)}"),
+            }
+        if action != "navigate":
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": "Пока поддерживается только action='navigate'.",
+            }
+        target_url = str(payload.get("url") or "").strip()
+        if not target_url.lower().startswith(self._SAFE_URL_SCHEMES):
+            return {
+                "ok": False,
+                "error": "NavigationBlocked",
+                "message": "Разрешены только http(s) URL (ТЗ 3.5).",
+                "hint": "javascript:/file:/data: запрещены.",
+            }
+
+        page = await self.require_page(params)
+
+        # Шаг 1 (ТЗ 6.4): фиксация текущего видео.
+        actual_id = None
+        with contextlib.suppress(Exception):
+            actual_id = await page.evaluate(r"""
+            () => {
+              try {
+                const pr = window.ytInitialPlayerResponse;
+                if (pr && pr.videoDetails && pr.videoDetails.videoId)
+                  return pr.videoDetails.videoId;
+              } catch (e) {}
+              const m = location.href.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+              return m ? m[1] : null;
+            }
+            """)
+        verify_video_id = bool(options.get("verify_video_id", True))
+        if not expected_video_id:
+            expected_video_id = actual_id or ""
+        if verify_video_id and not expected_video_id:
+            return {
+                "ok": False,
+                "error": "ValueRequired",
+                "message": "video_id текущего видео неизвестен — "
+                           "расписание не устанавливается (ТЗ 6.4 шаг 1).",
+                "hint": "Сначала browser_video action=\"state\".",
+            }
+
+        schedule_id = uuid.uuid4().hex[:12]
+        cfg = {
+            "schedule_id": schedule_id,
+            "trigger": trigger,
+            "action": action,
+            "target_url": target_url,
+            "expected_video_id": expected_video_id,
+            "verify_video_id": verify_video_id,
+            "at_time": float(options.get("at_time", 0) or 0),
+        }
+        # ТЗ 6.2: ловушка переживает навигацию — init-скрипт ставится на
+        # страницу; для video_ended дополнительно вождается 'ended' в
+        # текущем документе (шаг 3 ТЗ 6.4).
+        try:
+            await self._arm_init_trap(page, cfg)
+            if trigger == "video_ended":
+                await page.evaluate(r"""
+                (cfg) => {
+                  const attach = () => {
+                    const v = document.querySelector('video');
+                    if (!v) { setTimeout(attach, 300); return; }
+                    v.addEventListener('ended', () => {
+                      window.__browserdTraps = window.__browserdTraps || [];
+                      const t = window.__browserdTraps.find(
+                        x => x.schedule_id === cfg.schedule_id && !x.done);
+                      if (!t) return;
+                      let currentId = null;
+                      try {
+                        const pr = window.ytInitialPlayerResponse;
+                        if (pr && pr.videoDetails)
+                          currentId = pr.videoDetails.videoId;
+                      } catch (e) {}
+                      if (!currentId) {
+                        const m = location.href.match(
+                          /[?&]v=([A-Za-z0-9_-]{11})/);
+                        currentId = m ? m[1] : null;
+                      }
+                      if (t.verify_video_id && t.expected_video_id &&
+                          currentId && currentId !== t.expected_video_id) {
+                        t.done = true;
+                        (window.__browserdTrapLog =
+                          window.__browserdTrapLog || []).push(
+                            {schedule_id: t.schedule_id,
+                             state: 'skipped_context', at: Date.now()});
+                        return;
+                      }
+                      t.done = true;
+                      (window.__browserdTrapLog =
+                        window.__browserdTrapLog || []).push(
+                          {schedule_id: t.schedule_id, state: 'fired',
+                           from_video_id: currentId, to_url: t.target_url,
+                           at: Date.now()});
+                      try {
+                        if (typeof window.__agentVideoTrapFired ===
+                            'function') {
+                          window.__agentVideoTrapFired({
+                            schedule_id: t.schedule_id,
+                            trigger: t.trigger, action: t.action,
+                            payload: t.payload,
+                            from_video_id: currentId});
+                        }
+                      } catch (e) {}
+                    }, {once: true});
+                  };
+                  attach();
+                }
+                """, cfg)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": "ActionNotConfirmed",
+                    "message": f"Инъекция триггера не удалась: {exc}"}
+
+        record = {
+            "schedule_id": schedule_id,
+            "trigger": trigger,
+            "action": action,
+            "scope": scope,
+            "tab_id": self.active_tab_id,
+            "expected_video_id": expected_video_id,
+            "from_video_id": actual_id,
+            "target_url": target_url,
+            "state": "armed",
+            "once": bool(options.get("once", True)),
+            "cancel_on_user_navigation": bool(
+                options.get("cancel_on_user_navigation", True)),
+            "timeout_seconds": int(options.get("timeout_seconds", 0) or 0),
+            "created_at": utc_now(),
+            "fired_at": None,
+            "to_url": None,
+        }
+        self._schedules[schedule_id] = record
+        log.info("schedule armed: id=%s trigger=%s from=%s -> %s",
+                 schedule_id, trigger, actual_id, target_url)
+        return {
+            "ok": True,
+            "schedule_id": schedule_id,
+            "trigger": trigger,
+            "expected_video_id": expected_video_id,
+            "target_url": target_url,
+            "state": "armed",
+        }
+
+    async def _sweep_schedules(self) -> None:
+        """Обновление состояний расписаний (вызывается watchdog'ем)."""
+        if not self._schedules:
+            return
+        pages_by_id = {}
+        for page in self.pages:
+            with contextlib.suppress(Exception):
+                pages_by_id[self._page_id(page)] = page
+        for sid, rec in list(self._schedules.items()):
+            page = pages_by_id.get(rec["tab_id"])
+            if page is None or page.is_closed():
+                if rec["state"] == "armed":
+                    rec["state"] = "inactive"
+                    log.info("schedule %s: вкладка закрыта -> inactive", sid)
+                continue
+            if rec["state"] != "armed":
+                continue
+            status = None
+            with contextlib.suppress(Exception):
+                status = await page.evaluate(r"""
+                (sid) => {
+                  const NS = '__browserdTrap_' + sid;
+                  return {
+                    fired: !!window[NS + '_fired'],
+                    skipped: (window.__browserdTrapLog || []).some(
+                      x => x.schedule_id === sid && x.state === 'skipped_context'),
+                    log: (window.__browserdTrapLog || []).filter(
+                      x => x.schedule_id === sid)
+                  };
+                }
+                """, sid)
+            if not isinstance(status, dict):
+                continue
+            if status.get("fired"):
+                rec["state"] = "fired"
+                rec["fired_at"] = utc_now()
+                rec["to_url"] = rec["target_url"]
+                log.info("schedule %s FIRED -> %s", sid, rec["target_url"])
+            elif status.get("skipped") or (
+                    rec["cancel_on_user_navigation"] and
+                    (rec["expected_video_id"] or "") not in (page.url or "")):
+                rec["state"] = "canceled"
+                log.info("schedule %s canceled (user navigation/context)", sid)
+
+    async def cmd_cancel_schedule(self, params: dict[str, Any]) -> dict[str, Any]:
+        sid = str(params.get("schedule_id") or "").strip()
+        rec = self._schedules.get(sid)
+        if rec is None:
+            return {
+                "ok": False,
+                "error": "ScheduleNotFound",
+                "message": f"Расписание {sid!r} не найдено.",
+                "hint": "browser_list_schedules для актуального списка.",
+            }
+        # Удаляем слушателя со страницы, если она ещё жива.
+        for page in self.pages:
+            if self._page_id(page) == rec["tab_id"]:
+                with contextlib.suppress(Exception):
+                    await page.evaluate(r"""
+                    (sid) => {
+                      const NS = '__browserdTrap_' + sid;
+                      window[NS] = false;
+                      window[NS + '_fired'] = false;
+                      const v = document.querySelector('video');
+                      if (v) {
+                        // Ловушка регистрировала once-слушатель; полная
+                        // пересборка обработчика невозможна, но флаг NS
+                        // блокирует fire(). Дополнительно снимаем clone:
+                        const nv = v.cloneNode(false);
+                        if (nv.src) { nv.src = v.src; }
+                        v.parentNode && v.parentNode.replaceChild(nv, v);
+                      }
+                    }
+                    """, sid)
+                break
+        rec["state"] = "canceled"
+        log.info("schedule %s canceled by request", sid)
+        return {"ok": True, "schedule_id": sid, "state": "canceled"}
+
+    async def cmd_list_schedules(self, _params: dict[str, Any]) -> dict[str, Any]:
+        await self._sweep_schedules()
+        return {
+            "ok": True,
+            "schedules": [
+                {k: v for k, v in rec.items()}
+                for rec in self._schedules.values()
+            ],
         }
 
     # ------------------------------------------------------------------
