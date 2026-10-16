@@ -86,3 +86,12 @@ class WindowManager:
         if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
             return {"width": width, "height": height}
         return None
+
+    def should_enforce_os_window(self) -> bool:
+        """ТЗ 7.6: enforce_os_window + валидные размеры (headless — нет)."""
+        if not self.config.get("enforce_os_window"):
+            return False
+        width = self.config.get("width")
+        height = self.config.get("height")
+        return (isinstance(width, int) and isinstance(height, int)
+                and width > 0 and height > 0)
