@@ -333,31 +333,57 @@ class BrowserController:
                 f"Импорт camoufox.async_api завершился ошибкой: {exc}"
             ) from exc
 
-        # ТЗ 7.3 (запускной уровень): viewport из config/window.json.
-        # Если use_viewport=false или конфиг битый — get_viewport()
-        # возвращает None и Camoufox использует свой дефолт.
+        # ТЗ 7.3 (запускной уровень): геометрия окна применяется ТОЛЬКО при
+        # открытии браузера (пользовательское требование):
+        # 1) размеры окна ОС восстанавливаются из сохранённого в конфиге
+        #    фактического состояния (режим track пишет, старт читает);
+        # 2) viewport-фиксация content area включается только явным
+        #    use_viewport=true (по умолчанию false — иначе жёсткий viewport
+        #    конфликтует с размерами окна и окно открывается «рандомного»
+        #    размера).
         launch_kwargs: dict[str, Any] = {
             "headless": self.headless,
             "persistent_context": True,
             "user_data_dir": str(self.profile_dir),
         }
-        viewport = None
+        startup_cfg: dict[str, Any] | None = None
         if self.window_manager is not None:
             with contextlib.suppress(Exception):
-                viewport = self.window_manager.get_viewport()
-        if isinstance(viewport, dict) and viewport.get("width") \
-                and viewport.get("height"):
-            launch_kwargs["viewport"] = viewport
-            log.info("Применён viewport из конфига: %sx%s",
-                     viewport["width"], viewport["height"])
+                startup_cfg = self.window_manager.get_startup_geometry()
+            viewport = self.window_manager.get_viewport()
+            if isinstance(viewport, dict) and viewport.get("width") \
+                    and viewport.get("height"):
+                launch_kwargs["viewport"] = viewport
+                log.info("Применён viewport из конфига: %sx%s",
+                         viewport["width"], viewport["height"])
+
+        def _camoufox_kwargs(kw: dict[str, Any]) -> dict[str, Any]:
+            """Добавить firefox_user_prefs с размером окна (если API есть)."""
+            if startup_cfg is None:
+                return kw
+            extra: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                import inspect
+
+                sig = inspect.signature(AsyncCamoufox.__init__)
+                if "firefox_user_prefs" in sig.parameters:
+                    extra["firefox_user_prefs"] = {
+                        "browser.startup.width": int(startup_cfg["width"]),
+                        "browser.startup.height": int(startup_cfg["height"]),
+                        "browser.startup.screenX": int(startup_cfg.get("x", 0)),
+                        "browser.startup.screenY": int(startup_cfg.get("y", 0)),
+                    }
+            return {**kw, **extra}
 
         try:
-            self.cm = AsyncCamoufox(**launch_kwargs)
+            self.cm = AsyncCamoufox(**_camoufox_kwargs(launch_kwargs))
         except TypeError:
-            # Старые версии Camoufox могут не принимать viewport —
-            # деградируем к запуску без него, но не падаем (ТЗ 7.7).
-            log.warning("AsyncCamoufox не принимает viewport; запускаю без него")
+            # Старые версии Camoufox могут не принимать viewport/доп. параметры —
+            # деградируем к запуску без них, но не падаем (ТЗ 7.7).
+            log.warning("AsyncCamoufox не принял часть параметров запуска; "
+                        "пробую без viewport/firefox_user_prefs")
             launch_kwargs.pop("viewport", None)
+            startup_cfg = None
             self.cm = AsyncCamoufox(**launch_kwargs)
 
         try:
@@ -406,14 +432,13 @@ class BrowserController:
             self.active_index = 0
             self.active_tab_id = self._page_id(self.pages[0])
 
-        # ТЗ 7.2 (системный уровень): принудить окно ОС к геометрии из
-        # конфига ТОЛЬКО при запуске браузера и только в режиме "apply".
-        # В режиме "track" (по умолчанию) окно не двигается: watchdog будет
-        # отслеживать его фактическую геометрию и записывать её в конфиг,
-        # а на следующем старте эти сохранённые размеры применятся сами
-        # (persistent-профиль / xulstore).
-        if (not self.headless and self.window_manager is not None
-                and self.window_manager.should_enforce_os_window()):
+        # ТЗ 7.2 (системный уровень): привести окно ОС к геометрии из
+        # конфига ОДИН РАЗ при запуске браузера. Это единственный момент,
+        # когда менеджер окон что-либо применяет (пользовательское
+        # требование): дальше watchdog только отслеживает окно и пишет его
+        # фактические размеры в конфиг (режим track). Повторное применение
+        # геометрии во время работы запрещено.
+        if (not self.headless and startup_cfg is not None):
             scale = 1.0
             with contextlib.suppress(Exception):
                 dpr = await asyncio.wait_for(
@@ -421,8 +446,11 @@ class BrowserController:
                     timeout=5,
                 )
                 scale = float(dpr or 1.0)
-            self._apply_os_geometry(self.window_manager.config, scale=scale)
-            self._last_geometry_check = time.monotonic()
+            self._apply_os_geometry(startup_cfg, scale=scale)
+            # После старта НЕ запоминаем время проверки: первый цикл
+            # watchdog должен сразу считать фактическую геометрию нового
+            # окна и записать её в конфиг (режим track).
+            self._last_geometry_check = 0.0
 
         log.info(
             "Camoufox started; pid=%d profile=%s tabs=%d",
@@ -921,16 +949,20 @@ class BrowserController:
             log.warning("Принудительное применение геометрии не удалось: %s", exc)
 
     async def _check_window_geometry(self) -> None:
-        """Надзорный уровень геометрии (ТЗ 7.5, переработанный).
+        """Надзорный уровень геометрии (ТЗ 7.5, режим наблюдателя).
 
-        Режимы (config/window.json, поле "geometry_mode"):
-        - "track" (по умолчанию): менеджер ТОЛЬКО отслеживает фактические
-          размеры/положение окна и записывает их в config/window.json.
-          Окно никогда не двигается. Применённые при открытии браузера
-          размеры (профиль/xulstore, viewport) становятся источником
-          истины для следующего запуска.
-        - "apply": прежнее поведение — сравнение с конфигом и принудительный
-          возврат окна к геометрии из конфига через os_window_control.
+        Пользовательское требование: менеджер окон во время работы ТОЛЬКО
+        отслеживает фактические размеры/положение окна и записывает их в
+        config/window.json. Окно никогда не двигается и не возвращается к
+        «конфигу» — конфиг сам является зеркалом последнего реального
+        состояния окна; сохранённая геометрия применяется исключительно при
+        открытии браузера (BrowserController.start).
+
+        Режим "apply" (принудительное возвращение окна к геометрии из
+        конфига каждые N секунд) оставлен только как явная опция для
+        отладки: geometry_mode="apply" + enforce_os_window=true. По
+        умолчанию в конфиге стоит "track".
+
         Ошибки никогда не роняют watchdog (ТЗ 7.7).
         """
         wm = getattr(self, "window_manager", None)
@@ -968,7 +1000,7 @@ class BrowserController:
                 wm.update_geometry(geo)
             return
 
-        # --- Режим apply: принудительный возврат к геометрии конфига ---
+        # --- Явный отладочный режим apply (выключен по умолчанию) ---
         if not (wm.config.get("enforce_os_window") and wm.should_enforce_os_window()):
             return
         # Анти-дрейф: если последние применения не привели окно к целевым

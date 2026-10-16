@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -164,6 +165,8 @@ class DaemonConnector:
         self.pid = None
         self.tabs_cache = []
         self.active_index = 0
+        self._autostart_in_progress = False
+        self._last_autostart_error = ""
 
     @staticmethod
     def read_state():
@@ -177,21 +180,66 @@ class DaemonConnector:
         if self.writer and not self.writer.is_closing():
             return
 
+        # 1. Активный демон с совместимым протоколом — подключаемся.
         state = self.read_state()
-        if not state:
+        if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+            try:
+                await self._connect_to(state)
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Подключение к активному демону не удалось: %s", exc)
+
+        # 2. State-файл демоном новой версии (агент обновился раньше демона).
+        if state:
+            try:
+                v = int(state.get("version"))
+            except (TypeError, ValueError):
+                v = None
+            if v is not None and v > max(SUPPORTED_PROTOCOL_VERSIONS):
+                raise RuntimeError(
+                    "Демон запущен более новой версией протокола (v%s), чем "
+                    "этот MCP-сервер. Перезапустите демон и MCP-хост из одной "
+                    "сборки (python daemon_control.py restart)." % v
+                )
+
+        # 3. Демон не запущен / state битый / процесс мёртв — автозапуск
+        #    через daemon_control (ТЗ: «открой сайт» должно работать без
+        #    ручного browser_start; агент не должен переспрашивать).
+        if await self.autostart_daemon():
+            state = self.read_state()
+            if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+                try:
+                    await self._connect_to(state)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        "Демон запущен автоматически, но подключиться не "
+                        "удалось: %s. Подробности — в browserd.log." % exc
+                    )
             raise RuntimeError(
-                "Демон не найден. Сначала запустите browserd.py отдельно."
+                "Демон запущен автоматически, но его state-файл недоступен. "
+                "Проверьте browserd.log."
             )
-        if state.get("version") not in SUPPORTED_PROTOCOL_VERSIONS:
-            raise RuntimeError(
-                "Версия протокола демона не поддерживается: %r. "
-                "Остановите старый демон и запустите browserd v5."
-                % (state.get("version"),)
-            )
+
+        # 4. Не удалось ни подключиться, ни запустить — понятная ошибка
+        #    с указанием причины (без ложных обещаний автозапуска).
+        detail = getattr(self, "_last_autostart_error", "") or ""
+        if state:
+            reason = ("state-файл есть (v%s, status=%s), но демон недоступен"
+                      % (state.get("version"), state.get("status")))
+        else:
+            reason = "state-файл не найден"
+        raise RuntimeError(
+            "Браузер не запущен и автозапуск не удался (%s). %s"
+            "Запустите вручную: python daemon_control.py start "
+            "(подробности — в daemon_control.log и browserd.log)."
+            % (reason, ("Последняя ошибка: " + detail + ". ") if detail else "")
+        )
+
+    async def _connect_to(self, state: dict):
+        """Открыть TCP-соединение с демоном по state-файлу и авторизоваться."""
         if state.get("status") not in ("running", "degraded"):
-            raise RuntimeError(
-                "Демон не готов: status=%s" % state.get("status")
-            )
+            raise RuntimeError("Демон не готов: status=%s" % state.get("status"))
 
         host = state.get("tcp_host")
         port = int(state.get("tcp_port", 0))
@@ -217,6 +265,72 @@ class DaemonConnector:
             raise RuntimeError("Авторизация демона или версия протокола неверна")
 
         log.info("Connected to standalone daemon pid=%s", self.pid)
+
+    #: Максимальное ожидание готовности демона после автозапуска, сек.
+    AUTOSTART_WAIT_SECONDS = 90
+
+    async def autostart_daemon(self) -> bool:
+        """Запустить browserd через daemon_control.start_daemon() и дождаться state.
+
+        Возвращает True, если state-файл появился и стал читаемым.
+        Ошибка запуска НЕ бросается наружу — сохраняется в
+        ``_last_autostart_error`` (вызывающий формирует итоговую ошибку).
+        """
+        if self._autostart_in_progress:
+            # Параллельные tool call'ы: ждём, пока первый завершит запуск.
+            deadline = time.monotonic() + self.AUTOSTART_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                state = self.read_state()
+                if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS \
+                        and state.get("status") in ("running", "degraded"):
+                    return True
+                await asyncio.sleep(0.5)
+            return False
+
+        self._autostart_in_progress = True
+        try:
+            log.info("Автозапуск браузера: демон не найден, запускаю browserd")
+            rc_holder: Dict[str, Any] = {}
+
+            def _run_launcher():
+                import daemon_control
+
+                rc_holder["rc"] = daemon_control.start_daemon()
+
+            launcher = asyncio.create_task(asyncio.to_thread(_run_launcher))
+            deadline = time.monotonic() + self.AUTOSTART_WAIT_SECONDS
+            while True:
+                state = self.read_state()
+                if (state
+                        and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS
+                        and state.get("status") in ("running", "degraded")):
+                    await asyncio.sleep(0.2)
+                    return True
+                if launcher.done():
+                    rc = rc_holder.get("rc")
+                    if rc == 0:
+                        # start_daemon нашёл уже работающий демон
+                        state = self.read_state()
+                        if state and state.get("version") in SUPPORTED_PROTOCOL_VERSIONS:
+                            return True
+                    self._last_autostart_error = (
+                        "daemon_control завершился с кодом %r "
+                        "(см. daemon_control.log)." % rc
+                    )
+                    return False
+                if time.monotonic() > deadline:
+                    self._last_autostart_error = (
+                        "демон не подтвердил готовность за %d сек "
+                        "(см. browserd.log)." % self.AUTOSTART_WAIT_SECONDS
+                    )
+                    return False
+                await asyncio.sleep(0.5)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Автозапуск демона завершился ошибкой")
+            self._last_autostart_error = "%s: %s" % (type(exc).__name__, exc)
+            return False
+        finally:
+            self._autostart_in_progress = False
 
     async def _reader_loop(self):
         try:
@@ -320,10 +434,22 @@ class DaemonConnector:
     async def send(self, command: str, params: Optional[dict] = None,
                    timeout: Optional[float] = None):
         if not self.writer or self.writer.is_closing():
-            raise ConnectionError(
-                "Нет активного подключения. Выполните browser_start. "
-                "Демон не запускался и не останавливался автоматически."
-            )
+            # Прозрачный самоподхват: если соединение потеряно (демон был
+            # перезапущен/остановлен), переподключаемся по state-файлу —
+            # при необходимости с автозапуском. Явные browser_start/browser_stop
+            # не трогаем: у browser_stop своё семантическое поведение.
+            if command != "stop":
+                try:
+                    await self.ensure_connected()
+                except Exception as exc:  # noqa: BLE001
+                    raise ConnectionError(
+                        "Нет активного подключения к браузеру и "
+                        "переподключение не удалось: %s" % exc
+                    )
+            else:
+                raise ConnectionError(
+                    "Нет активного подключения. Демон уже остановлен."
+                )
         payload = {"cmd": command}
         if params:
             payload.update(params)
@@ -422,6 +548,41 @@ async def call(command: str, params: Optional[dict] = None, *,
         AUDIT.record(tool_name, check_args, decision=retry.to_dict(),
                      result=result, context=CONTEXT_MANAGER.get_active_context().to_public_dict())
         return result
+
+    # Прозрачный самоподхват браузера (ТЗ §8.1 + фидбек пользователя):
+    # любая команда, кроме явного stop, при отсутствии подключения сама
+    # подключается к демону или запускает его. Агент не должен сначала
+    # вызывать browser_start — «открой сайт» работает одним вызовом.
+    if command != "stop":
+        try:
+            await connector.ensure_connected()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Автоподключение демона перед %s не удалось: %s",
+                        command, exc)
+            result = {
+                "ok": False,
+                "error": "DaemonUnavailable",
+                "message": str(exc),
+                "hint": "Демон не запущен и автозапуск не удался. "
+                        "Проверьте daemon_control.log/browserd.log или "
+                        "выполните вручную: python daemon_control.py start",
+            }
+            CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+            AUDIT.record(tool_name, check_args, decision=decision.to_dict(),
+                         result=result, context=CONTEXT_MANAGER.get_active_context().to_public_dict())
+            return result
+
+    # Анти-цикл PolicyGuard: повторный browser_new_tab с тем же URL
+    # автоматически переписывается в навигацию текущей вкладки.
+    if command == "new_tab" and check_args.get("__inplace_navigate"):
+        url = str((params or {}).get("url") or check_args.get("url") or "")
+        if url.startswith(("http://", "https://")):
+            log.info("PolicyGuard inplace-rewrite: new_tab(%s) -> navigate",
+                     url)
+            command = "navigate"
+            params = {"url": url}
+        else:
+            command, params = "new_tab", params or {}
 
     result = await connector.send(command, params)
 
