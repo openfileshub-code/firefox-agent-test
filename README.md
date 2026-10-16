@@ -149,7 +149,7 @@ py -3 -m venv "$Project\.venv"
 ```
 **Ожидаемое поведение:**
 1. Откроется окно Camoufox/Firefox.
-2. В папке появится `browserd.log`.
+2. В папке `logs/` появится `browserd.log`.
 3. В `playwright_profile/` создастся `.browserd_state.json`.
 
 *Оставьте это окно PowerShell открытым на время проверки. **Не запускайте второй экземпляр демона с тем же профилем**!*
@@ -279,10 +279,11 @@ Copy-Item "$Project\config\user_tool_settings.example.json" "$Project\config\use
 
 Если что-то пошло не так, **не убивайте процессы принудительно** через Диспетчер задач! Это может повредить профиль браузера и оставить lock-файлы. Код не удаляет их автоматически в целях безопасности (иначе можно нарушить работу живой сессии).
 
-**Где искать правду:**
-- `browserd.log` — основные ошибки демона, падения Playwright, проблемы с профилем.
-- `mcp_debug.log` — лог взаимодействия MCP-сервера и хоста (ротация до 5 МБ, 3 копии).
-- `daemon_control.log` — лог работы VBS/BAT скриптов.
+**Где искать правду (все логи пишутся в папку `logs/`):**
+- `logs/browserd.log` — основные ошибки демона, падения Playwright, проблемы с профилем.
+- `logs/mcp_debug.log` — лог взаимодействия MCP-сервера и хоста (ротация до 5 МБ, 3 копии).
+- `logs/daemon_control.log` — лог работы VBS/BAT скриптов.
+- `logs/tool_audit.jsonl` — аудит каждого tool call (решения PolicyGuard).
 - `playwright_profile/.browserd_state.json` — текущий статус демона (PID, TCP-порт, токен, версия протокола v4).
 
 **Частые проблемы:**
@@ -290,7 +291,7 @@ Copy-Item "$Project\config\user_tool_settings.example.json" "$Project\config\use
 - **Ошибка версии протокола:** Демон и MCP-сервер используют `PROTOCOL_VERSION = 4`. Если версии не совпадают, остановите старый демон и запустите новую версию.
 - **Браузер закрывается при закрытии хоста:** Значит, вы запустили `browserd.py` из того же терминала, что и MCP-хост, или Планировщик заданий не настроен. Демон должен быть независимым процессом.
 - **VBS выдает кракозябры:** Сохраните `.vbs` в кодировке "Юникод" (UTF-16 LE с BOM).
-- **Ошибка "Профиль уже используется":** Демон не завершился штатно. Проверьте `browserd.log`, найдите процесс в Диспетчере задач и завершите его, затем удалите `parent.lock` в папке `playwright_profile`.
+- **Ошибка "Профиль уже используется":** Демон не завершился штатно. Проверьте `logs/browserd.log`, найдите процесс в Диспетчере задач и завершите его, затем удалите `parent.lock` в папке `playwright_profile`.
 - **`start_browser.vbs` не запускает второй демон:** Это защитная мера. Если state-файл указывает на живой, но недоступный процесс, скрипт откажется запускать новый демон, чтобы не повредить профиль.
 
 ---
@@ -390,5 +391,5 @@ Extended tools (if registered): `browser_inspect_page`, `browser_search_text`, `
 ### 🩺 Troubleshooting
 - **Do not force kill processes** via Task Manager. Use the `browser_stop` MCP tool or `stop_browser.vbs` to gracefully save the session.
 - **Protocol version:** Both daemon and server use `PROTOCOL_VERSION = 4`. Mismatched versions will throw an error.
-- **Logs:** Check `browserd.log` for Playwright errors, `mcp_debug.log` for host communication issues, and `.browserd_state.json` for TCP port/PID status.
+- **Logs:** All logs live in the `logs/` folder: check `logs/browserd.log` for Playwright errors, `logs/mcp_debug.log` for host communication issues, and `.browserd_state.json` for TCP port/PID status.
 - **Profile Locks:** If the daemon crashes, the OS will release the lock. Do not manually delete lock files unless you are sure the process is dead.
