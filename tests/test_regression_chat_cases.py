@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import importlib
 import json
 import re
 import sys
@@ -336,7 +337,15 @@ class TestMiddlewareIntegration:
             return {"ok": True, "url": params.get("url"),
                     "video_id": None}
 
+        # call() перед отправкой выполняет ensure_connected (в тестовой среде
+        # .venv/Scripts/python.exe нет — автозапуск демона невозможен), поэтому
+        # мокаем и его тоже; интеграционный смысл теста — guard не блокирует
+        # разрешённую команду и результат send() проходит наверх.
+        async def fake_ensure():
+            return None
+
         monkeypatch.setattr(server.connector, "send", fake_send)
+        monkeypatch.setattr(server.connector, "ensure_connected", fake_ensure)
 
         async def run():
             return await server.call(

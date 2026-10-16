@@ -72,6 +72,7 @@ firefox-agent-test/
 ├── adapters/                          # Адаптеры для специфичных сайтов (Rutube, VK и др.)
 ├── tests/                             # Unit и Live тесты (pytest)
 ├── docs/                              # Документация
+├── logs/                              # Runtime-логи (в git не попадают, см. logs/README.md)
 └── playwright_profile/                # Персистентный профиль браузера (создается автоматически)
 ```
 
