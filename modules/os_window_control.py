@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
@@ -53,8 +54,33 @@ def _err(message: str, **details: Any) -> dict[str, Any]:
 # Windows (ctypes user32) — ТЗ 7.4 «Windows»
 # ----------------------------------------------------------------------
 
+def _win_dpi(pid_hint: Optional[int] = None) -> float:
+    """Масштаб Windows (96=100%). Best-effort, по умолчанию 1.0."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        shcore = getattr(ctypes.windll, "shcore", None)
+        dpi_p = ctypes.c_uint(0)
+        if shcore is not None:
+            with contextlib.suppress(Exception):
+                # MDT_EFFECTIVE_DPI = 0
+                hr = shcore.GetDpiForMonitor(
+                    ctypes.c_void_p(user32.MonitorFromPoint(0, 0, 0)),
+                    ctypes.c_int(0),
+                    ctypes.byref(dpi_p), ctypes.byref(ctypes.c_uint()),
+                )
+                if hr == 0 and dpi_p.value:
+                    return dpi_p.value / 96.0
+        hdc = user32.GetDC(0)
+        dpi = int(user32.GetDeviceCaps(hdc, 88) or 96)  # LOGPIXELSX
+        user32.ReleaseDC(0, hdc)
+        return dpi / 96.0 if dpi > 0 else 1.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
 def _win_apply(x: int, y: int, width: int, height: int,
-               pid: Optional[int]) -> dict[str, Any]:
+               pid: Optional[int], scale: float = 1.0) -> dict[str, Any]:
     try:
         from ctypes import wintypes
         import ctypes
@@ -120,14 +146,29 @@ def _win_apply(x: int, y: int, width: int, height: int,
                     pid=target_pid)
 
     hwnd = found[0]
-    ok = SetWindowPos(hwnd, 0, int(x), int(y), int(width), int(height),
+
+    # Проверка на максимизированное состояние (IsZoomed): если окно
+    # развернуто, SetWindowPos не может задать нормальные размеры без
+    # сначала ShowWindow(SW_RESTORE). Пытаемся восстановить.
+    SW_RESTORE = 9
+    with contextlib.suppress(Exception):
+        if user32.IsZoomed(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+
+    # Масштаб DPI: конфиг в CSS px -> физ px для SetWindowPos.
+    s = float(scale) if scale and scale > 0 else _win_dpi()
+    fx, fy = int(round(x * s)), int(round(y * s))
+    fw, fh = int(round(width * s)), int(round(height * s))
+
+    ok = SetWindowPos(hwnd, 0, fx, fy, fw, fh,
                       SWP_NOZORDER | SWP_NOACTIVATE)
     if not ok:  # pragma: no cover
         return _err("SetWindowPos вернул ошибку", hwnd=hwnd)
-    log.info("Windows: применена геометрия %sx%s @(%s,%s) hwnd=%s",
-             width, height, x, y, hwnd)
+    log.info("Windows: применена геометрия %sx%s @(%s,%s) hwnd=%s scale=%.2f",
+             fw, fh, fx, fy, hwnd, s)
     return {"ok": True, "platform": "windows", "hwnd": hwnd,
-            "x": x, "y": y, "width": width, "height": height}
+            "x": x, "y": y, "width": width, "height": height,
+            "physical_width": fw, "physical_height": fh, "scale": s}
 
 
 def _win_get_geometry(pid: Optional[int]) -> Optional[dict[str, Any]]:
@@ -255,16 +296,20 @@ def _mac_apply(x: int, y: int, width: int, height: int,
 # ----------------------------------------------------------------------
 
 def apply_geometry(x: int, y: int, width: int, height: int,
-                   pid: Optional[int] = None) -> dict[str, Any]:
+                   pid: Optional[int] = None,
+                   scale: Optional[float] = None) -> dict[str, Any]:
     """Принудительно задать геометрию верхнеуровневого окна браузера.
 
-    Возвращает структурированный результат; никогда не бросает исключение
-    наружу (ТЗ 7.7).
+    Координаты/размеры — в CSS px; на Windows пересчитываются в физиче-
+    ские пиксели по `scale` (devicePixelRatio из page.evaluate) или по DPI
+    системы. Возвращает структурированный результат; никогда не бросает
+    исключение наружу (ТЗ 7.7).
     """
     system = platform.system().lower()
     try:
         if system == "windows" or sys.platform == "win32":
-            return _win_apply(x, y, width, height, pid)
+            return _win_apply(x, y, width, height, pid,
+                              scale=float(scale) if scale else 1.0)
         if system == "darwin":
             return _mac_apply(x, y, width, height, pid)
         return _linux_apply(x, y, width, height, pid)

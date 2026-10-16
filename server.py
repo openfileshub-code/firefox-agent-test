@@ -33,7 +33,9 @@ from modules.audit_logger import get_audit_logger             # noqa: E402
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "playwright_profile"
 STATE_FILE = PROFILE_DIR / ".browserd_state.json"
-PROTOCOL_VERSION = 5
+#: Совместимые версии протокола state-файла (демон v4 ещё работоспособен;
+#: новые команды просто вернут понятную ошибку "unknown command").
+SUPPORTED_PROTOCOL_VERSIONS = (4, 5)
 MAX_FRAME_BYTES = 6 * 1024 * 1024
 
 TIMEOUTS = {
@@ -180,10 +182,11 @@ class DaemonConnector:
             raise RuntimeError(
                 "Демон не найден. Сначала запустите browserd.py отдельно."
             )
-        if state.get("version") != PROTOCOL_VERSION:
+        if state.get("version") not in SUPPORTED_PROTOCOL_VERSIONS:
             raise RuntimeError(
-                "Версия протокола демона не совпадает. "
-                "Остановите старый демон и запустите новую версию."
+                "Версия протокола демона не поддерживается: %r. "
+                "Остановите старый демон и запустите browserd v5."
+                % (state.get("version"),)
             )
         if state.get("status") not in ("running", "degraded"):
             raise RuntimeError(
@@ -209,7 +212,7 @@ class DaemonConnector:
             timeout=10,
             require_ok=False,
         )
-        if not auth.get("ok") or auth.get("protocol") != PROTOCOL_VERSION:
+        if not auth.get("ok") or auth.get("protocol") not in SUPPORTED_PROTOCOL_VERSIONS:
             await self.disconnect()
             raise RuntimeError("Авторизация демона или версия протокола неверна")
 
