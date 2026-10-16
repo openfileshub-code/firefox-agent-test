@@ -8,7 +8,7 @@
     "forbid_placeholder_urls": true,
     "prefer_native_video_controls": true,
     "verify_after_mutation": true,
-    "max_retries": 2,
+    "max_retries": 5,
     "relevance_threshold": 0.55,
     "volume_tolerance": 0.005,
     "theater_confidence_threshold": 0.75
@@ -24,9 +24,9 @@
           "description": "Открыть элемент, который может находиться на текущей странице",
           "trigger_examples": [
             "открой {query}",
+            "найди {query}",
             "найди на странице {query}",
-            "открой Тут {query}",
-            "открой имеющуюся ссылку {query}"
+            "открой ссылку {query}"
           ],
           "action": "search_on_current_page_and_click_best_relevant_link",
           "allowed_tools": [
@@ -39,7 +39,7 @@
           ],
           "forbidden_tools": [
             "browser_new_tab",
-            "browser_navigate_to_search_url",
+            "browser_navigate",
             "browser_scroll"
           ],
           "selection_strategy": "best_relevant_visible_link",
@@ -93,22 +93,23 @@
   },
   "override_phrases": {
     "allow_new_tab": [
-      "открой в новой вкладке",
+      "в новой вкладке",
       "новая вкладка",
       "open in new tab",
       "new tab"
     ],
     "allow_site_search": [
       "поищи на сайте",
-      "выполни поиск на сайте",
+      "поиск на сайте",
       "перейди в поиск",
+      "найди на сайте",
       "найди через поиск сайта",
       "search on site",
       "site search"
     ],
     "allow_scroll": [
-      "прокрути вниз",
-      "прокрути вверх",
+      "вниз",
+      "вверх",
       "скролль",
       "листай",
       "scroll down",
