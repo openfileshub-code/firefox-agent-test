@@ -70,6 +70,35 @@ class TestTabsAndUrl:
         assert d.rule_source
         assert d.suggested_safe_actions
 
+    def test_new_tab_deny_auto_retry_no_user_confirmation(self, guard):
+        """Регрессия: «открой YouTube» не должен превращаться в переспрашивание.
+
+        Отказ POLICY_NEW_TAB_NOT_ALLOWED обязан содержать auto_retry-suggestion
+        с browser_navigate в текущей вкладке и НЕ требовать подтверждения
+        пользователя (иначе агент отвечает «скажите, перейти ли по адресу…»).
+        """
+        g, _, _ = guard
+        d = g.check("browser_new_tab", {"url": "https://www.youtube.com"})
+        assert not d.allowed
+        assert d.error_code == "POLICY_NEW_TAB_NOT_ALLOWED"
+        assert d.requires_user_confirmation is False
+        first = d.suggested_safe_actions[0]
+        assert first["tool"] == "browser_navigate"
+        assert first["args"]["url"] == "https://www.youtube.com"
+        assert first["args"]["new_tab"] is False
+        assert first.get("auto_retry") is True
+
+    def test_new_tab_global_allow_without_phrase_still_auto_retry(self, tmp_path):
+        """allow_new_tab=true без override-фразы: тоже авто-повтор, не подтверждение."""
+        loader = make_loader(tmp_path, {
+            "version": "1.0", "global": {"allow_new_tab": True}})
+        g = PolicyGuard(loader, ContextManager(settings=loader.get()))
+        d = g.check("browser_new_tab", {"url": "https://example.com"})
+        assert not d.allowed
+        assert d.requires_user_confirmation is False
+        assert any(s.get("auto_retry") and s["tool"] == "browser_navigate"
+                   for s in d.suggested_safe_actions)
+
     def test_new_tab_allowed_with_override_phrase(self, guard):
         g, _, _ = guard
         d = g.check("browser_new_tab", {
