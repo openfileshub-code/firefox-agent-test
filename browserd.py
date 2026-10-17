@@ -2928,11 +2928,26 @@ class BrowserController:
     }
     """
 
+    @staticmethod
+    def _coerce_dict(value: Any) -> dict[str, Any]:
+        """params-значения от LLM/MCP-клиента могут прийти JSON-строкой."""
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            with contextlib.suppress(Exception):
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
+
     async def cmd_schedule_action(self, params: dict[str, Any]) -> dict[str, Any]:
         trigger = str(params.get("trigger") or "").strip().lower()
         action = str(params.get("action") or "").strip().lower()
-        payload = params.get("payload") or {}
-        options = params.get("options") or {}
+        # Защита от LLM/MCP-клиентов: payload/options могут прийти как
+        # JSON-строка — приводим к dict, иначе .get() уронит демон
+        # (AttributeError: 'str' object has no attribute 'get').
+        payload = self._coerce_dict(params.get("payload"))
+        options = self._coerce_dict(params.get("options"))
         scope = str(params.get("scope") or "current_tab")
         expected_video_id = str(params.get("expected_video_id") or "").strip()
 

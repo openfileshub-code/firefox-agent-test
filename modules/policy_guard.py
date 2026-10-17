@@ -216,15 +216,17 @@ class PolicyGuard:
             code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
             message = (
                 "ОШИБКА: Переход на страницу выдачи сайта запрещён политикой "
-                "(browser_navigate_to_search_url в forbidden_tools). Не "
-                "повторяй вызов; используй browser_find_link или "
-                "browser_expand_menu на текущей странице.")
+                "(browser_navigate_to_search_url в forbidden_tools). ЗАПРЕЩЕНО "
+                "повторять этот заблокированный вызов. Немедленно выполни "
+                "первое действие из suggested_safe_actions в этом же ходе.")
         elif not global_allowed:
             code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
             message = (
                 "Поиск на сайте (URL выдачи) не разрешён: allow_site_search="
                 "false. Требуется явная фраза пользователя override_phrase. "
-                "Используй browser_find_link на текущей странице.")
+                "ЗАПРЕЩЕНО повторять этот заблокированный вызов и конструировать "
+                "URL поиска вручную — немедленно выполни первое действие из "
+                "suggested_safe_actions в этом же ходе.")
         else:
             return None
         q = _query_from(url)
@@ -233,6 +235,56 @@ class PolicyGuard:
             suggestions=[{"tool": "browser_find_link", "args": {"pattern": q}},
                          {"tool": "browser_search_on_page",
                           "args": {"pattern": q}}])
+
+    def check_site_search_policy(self, query: str, override_phrase=None,
+                                 site: str = "", context=None):
+        """Блок 1 ТЗ: политический контроль для виртуальной команды
+        site_search (инструмент browser_site_search). Семантика совпадает с
+        _site_search_gate для навигации на URL выдачи: если политика сайта
+        запрещает browser_navigate_to_search_url и нет дословной фразы
+        пользователя (override_phrase / настройка allow_site_search) — deny
+        с императивным сообщением и готовыми DOM-альтернативами."""
+        s = self.settings
+        ctx = context if context is not None else (self._cm.get_active_context()
+                                                   if self._cm else None)
+        site_forbidden = set()
+        if ctx is not None:
+            site_forbidden = s.site_forbidden_tools(
+                getattr(ctx, "site", "") or "")
+        virtual_forbidden = (
+            "browser_navigate_to_search_url" in site_forbidden)
+        if override_phrase and s.phrase_matches("allow_site_search",
+                                                override_phrase):
+            return ALLOW
+        if not virtual_forbidden and s.g("allow_site_search"):
+            return ALLOW
+        tool = "browser_site_search"
+        args = {"query": query, "override_phrase": override_phrase or ""}
+        if virtual_forbidden:
+            message = (
+                "ОШИБКА: Поиск на сайте (переход на страницу выдачи) "
+                "запрещён политикой сайта. Передай browser_site_search "
+                "дословную фразу пользователя в override_phrase (например "
+                "«найди на ютубе %s»), иначе работай по DOM текущей "
+                "страницы. ЗАПРЕЩЕНО повторять этот заблокированный вызов "
+                "без override_phrase и запрещено конструировать URL поиска "
+                "через browser_navigate. Немедленно выполни первое действие "
+                "из suggested_safe_actions в этом же ходе." % query)
+        else:
+            message = (
+                "Поиск на сайте не разрешён: allow_site_search=false. "
+                "Требуется дословная фраза пользователя в override_phrase. "
+                "ЗАПРЕЩЕНО повторять этот заблокированный вызов. Немедленно "
+                "выполни первое действие из suggested_safe_actions в этом же "
+                "ходе.")
+        return _deny(
+            "POLICY_SITE_SEARCH_NOT_REQUESTED", tool, args,
+            message=message,
+            suggestions=[
+                {"tool": "browser_search_on_page", "args": {"pattern": query}},
+                {"tool": "browser_find_link", "args": {"pattern": query}},
+                {"tool": "browser_get_context", "args": {}},
+            ])
 
     # ------------------------------------------------------------------
     @property
@@ -384,10 +436,13 @@ class PolicyGuard:
             return _deny(
                 "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
                 message="browser_new_tab требует override-фразу пользователя "
-                        "(например «открой в новой вкладке»). Если пользователь "
-                        "сказал просто «открой <сайт>» — немедленно повтори "
-                        "операцию через browser_navigate в текущей вкладке "
-                        "(см. suggestion с auto_retry), не переспрашивая его.",
+                        "(например «открой в новой вкладке»). ЗАПРЕЩЕНО "
+                        "повторять этот заблокированный вызов. Немедленно "
+                        "выполни первое действие из suggested_safe_actions в "
+                        "этом же ходе: если пользователь сказал просто "
+                        "«открой <сайт>» — повтори операцию через "
+                        "browser_navigate в текущей вкладке (suggestion с "
+                        "auto_retry), не переспрашивая его.",
                 suggestions=([] if nav_suggestion is None else [nav_suggestion])
                             + [{"tool": "browser_find_link",
                                 "args": {"pattern": ""}}],
@@ -426,9 +481,12 @@ class PolicyGuard:
             "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
             message="Новая вкладка запрещена: работайте в текущей вкладке. "
                     "Разрешение — только по явной фразе пользователя. "
-                    "Если пользователь сказал просто «открой <сайт>» — "
-                    "немедленно повтори операцию через browser_navigate "
-                    "в текущей вкладке (см. suggestion с auto_retry).",
+                    "ЗАПРЕЩЕНО повторять этот заблокированный вызов. "
+                    "Немедленно выполни первое действие из "
+                    "suggested_safe_actions в этом же ходе: если пользователь "
+                    "сказал просто «открой <сайт>» — повтори операцию через "
+                    "browser_navigate в текущей вкладке (suggestion с "
+                    "auto_retry).",
             suggestions=suggestions,
             confirmation=False)
 
@@ -649,11 +707,21 @@ class PolicyGuard:
         if action in EPISODE_ACTIONS and action != "episode_list":
             if ctx is not None and not getattr(ctx, "has_episode_queue", False) \
                     and not getattr(ctx, "list_id", None):
+                # Блок 3 ТЗ: агент часто путает эпизоды (плейлист/сериал)
+                # и главы (таймкоды одного видео). При отсутствии очереди
+                # эпизодов первым предлагаемым действием становится
+                # chapter_list — fallback для «списка эпизодов» обычного
+                # видео, чтобы агент не парсил DOM костылями.
                 return _deny(
                     "NO_EPISODE_CONTEXT", "browser_video", args,
-                    message="Нет контекста episodes/playlist. Сначала "
-                            "episode_list или browser_get_context.",
+                    message="Нет контекста episodes/playlist. Если вы ищете "
+                            "таймкоды (главы) текущего видео — немедленно "
+                            "вызови browser_video(action=\"chapter_list\"). "
+                            "Если это сериал/плейлист — сначала episode_list. "
+                            "Запрещено повторять этот заблокированный вызов.",
                     suggestions=[{"tool": "browser_video",
+                                  "args": {"action": "chapter_list"}},
+                                 {"tool": "browser_video",
                                   "args": {"action": "episode_list"}},
                                  {"tool": "browser_get_context"}])
 
