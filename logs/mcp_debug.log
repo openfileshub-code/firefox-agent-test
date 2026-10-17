@@ -71,3 +71,22 @@
 2026-10-17 16:04:30,160 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
 2026-10-17 16:04:30,160 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
 2026-10-17 16:04:30,164 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:12:24,553 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:12:24,554 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:12:25,152 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:12:25,154 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:12:25,378 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:12:25,378 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:12:25,381 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:12:41,169 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 16:12:44,942 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 16:12:49,019 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:12:49,021 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:13:40,237 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:13:40,238 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:13:40,824 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:13:40,826 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:13:41,052 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:13:41,053 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:13:41,055 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:13:46,611 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
