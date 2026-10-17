@@ -591,30 +591,20 @@ async def call(command: str, params: Optional[dict] = None, *,
     # виртуального инструмента browser_navigate_to_search_url применяется
     # здесь до исполнения (иначе демон обошёл бы middleware).
     if command == "site_search":
-        s = SETTINGS_LOADER.get()
-        ctx = CONTEXT_MANAGER.get_active_context()
-        forbidden = s.site_forbidden_tools(getattr(ctx, "site", "") or "")
-        if ("browser_navigate_to_search_url" in forbidden
-                and not s.phrase_matches(
-                    "allow_site_search", check_args.get("override_phrase"))):
-            result = {
-                "ok": False,
-                "error_code": "POLICY_SITE_SEARCH_NOT_REQUESTED",
-                "message": (
-                    "Поиск на сайте (переход на страницу выдачи) не разрешён "
-                    "политикой. Явная просьба пользователя или override_phrase"
-                    " обязательны; иначе используйте browser_find_link / "
-                    "browser_expand_menu на текущей странице."
-                ),
-                "rule_source": "user_settings.sites.forbidden_tools",
-                "suggested_safe_actions": [
-                    {"tool": "browser_find_link",
-                     "args": {"pattern": check_args.get("query", "")}},
-                    {"tool": "browser_get_context", "args": {}},
-                ],
-            }
+        # Блок 1 ТЗ: единая политическая проверка через PolicyGuard
+        # (семантика виртуального browser_navigate_to_search_url).
+        # Разрешено, если политика сайта НЕ запрещает поиск по URL либо
+        # передана дословная фраза пользователя override_phrase.
+        decision2 = POLICY_GUARD.check_site_search_policy(
+            str(check_args.get("query") or ""),
+            check_args.get("override_phrase"),
+            site=str(check_args.get("site") or ""))
+        if not decision2.allowed:
+            log.info("PolicyGuard deny (site_search): %s",
+                     decision2.error_code)
+            result = {"ok": False, **decision2.to_dict()}
             CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
-            AUDIT.record(tool_name, check_args, decision=result,
+            AUDIT.record(tool_name, check_args, decision=decision2.to_dict(),
                          result=result,
                          context=CONTEXT_MANAGER.get_active_context().to_public_dict())
             return result
@@ -1097,7 +1087,8 @@ async def browser_search_on_page(
 
 
 @mcp.tool()
-async def browser_site_search(query: str, site: str = "") -> dict:
+async def browser_site_search(query: str, site: str = "",
+                              override_phrase: str = "") -> dict:
     """Поиск на текущем сайте через его собственную форму поиска.
 
     Селекторы — из config/player_selectors.json (секция сайта), для
@@ -1105,8 +1096,17 @@ async def browser_site_search(query: str, site: str = "") -> dict:
     на URL выдачи перехватывается виртуальным инструментом
     browser_navigate_to_search_url и требует allow_site_search или
     override_phrase (POLICY_SITE_SEARCH_NOT_REQUESTED).
+
+    Args:
+        query: поисковый запрос.
+        site: ключ сайта из конфига (по умолчанию — определён по URL).
+        override_phrase: дословная фраза пользователя, разрешающая поиск
+            на сайте (например «ищи на сайте», «найди на ютубе …»).
+            Обязательна, если политика сайта запрещает переход на
+            страницу выдачи; без неё вызов вернёт
+            POLICY_SITE_SEARCH_NOT_REQUESTED.
     """
-    params = {"query": query}
+    params = {"query": query, "override_phrase": override_phrase}
     if site:
         params["site"] = site
     return await call("site_search", params)
