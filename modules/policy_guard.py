@@ -201,10 +201,20 @@ class PolicyGuard:
     # ------------------------------------------------------------------
     def check(self, tool: str, args: dict, context=None) -> PolicyDecision:
         try:
-            return self._check_inner(tool, args, context)
+            decision = self._check_inner(tool, args, context)
         except Exception:  # noqa: BLE001 — guard не должен ронять tool call
             log.exception("PolicyGuard.check(%s) internal error — allow", tool)
             return ALLOW
+        # ТЗ §15 (C7): бюджет одинаковых отказов. Каждый deny учитывается;
+        # после max_same_policy_denials подряд (окно 60 с) любой дальнейший
+        # deny того же вызова заменяется на POLICY_LOOP_DETECTED — жёсткий
+        # стоп-сигнал, запрещающий агенту повторять прогон (см. SKILL.md).
+        if not decision.allowed and decision.error_code != "POLICY_LOOP_DETECTED":
+            if self._record_denial(tool, args, decision.error_code or ""):
+                return self._loop_detected(
+                    tool, args, decision.error_code or "",
+                    suggestions=list(decision.suggested_safe_actions or []))
+        return decision
 
     def _check_inner(self, tool: str, args: dict, context=None) -> PolicyDecision:
         args = args or {}

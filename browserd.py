@@ -1890,25 +1890,97 @@ class BrowserController:
                 "matches": result,
             }
 
-        # Для литерального поиска используем Playwright-локатор.
-        locator = page.get_by_text(pattern, exact=False)
-        count = await locator.count()
-        matches = []
-
-        for index in range(min(count, 30)):
-            item = locator.nth(index)
-            try:
-                if not await item.is_visible():
-                    continue
-                text = await item.inner_text(timeout=2000)
-                matches.append(text[:300])
-            except Exception:
-                continue
+        # ТЗ §15.3 (C5): литеральный поиск возвращает кликабельные
+        # совпадения с метаданными href/selector/index/actionable, а не
+        # голый список строк. Элемент поднимается до ближайшего
+        # интерактивного предка (a/button/[role]…), как в cmd_find_link.
+        try:
+            matches = await page.evaluate(
+                r"""
+                needle => {
+                  const norm = s => (s || '')
+                    .replace(/\s+/g, ' ').trim().toLowerCase()
+                    .replace(/ё/g, 'е');
+                  const target = norm(needle);
+                  const INTERACTIVE =
+                    'a[href],button,[role="button"],[role="tab"],' +
+                    '[role="menuitem"],input[type="submit"],summary';
+                  function cssPath(el) {
+                    if (!el || el === document.body) return 'body';
+                    const parts = [];
+                    let node = el;
+                    while (node && node.nodeType === 1 &&
+                           node !== document.body && parts.length < 6) {
+                      let seg = node.tagName.toLowerCase();
+                      if (node.id) { parts.unshift(seg + '#' + node.id); break; }
+                      const parent = node.parentElement;
+                      if (parent) {
+                        const sib = [...parent.children].filter(
+                          c => c.tagName === node.tagName);
+                        if (sib.length > 1)
+                          seg += ':nth-of-type(' + (sib.indexOf(node) + 1) + ')';
+                      }
+                      parts.unshift(seg);
+                      node = parent;
+                    }
+                    return parts.join(' > ');
+                  }
+                  const out = [];
+                  const seen = new Set();
+                  const walker = document.createTreeWalker(
+                    document.body || document.documentElement,
+                    NodeFilter.SHOW_TEXT);
+                  let node, loops = 0;
+                  while ((node = walker.nextNode()) && out.length < 30 &&
+                         loops++ < 20000) {
+                    const t = norm(node.textContent);
+                    if (!target || !t || t.indexOf(target) < 0) continue;
+                    let el = node.parentElement;
+                    if (!el) continue;
+                    let clickable = null, depth = 0;
+                    let up = el;
+                    while (up && up !== document.body && depth++ < 8) {
+                      if (up.matches && up.matches(INTERACTIVE)) {
+                        clickable = up; break;
+                      }
+                      up = up.parentElement;
+                    }
+                    const anchor = clickable || el;
+                    const key = cssPath(anchor) + '|' +
+                      (anchor.href || '');
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    const s = getComputedStyle(anchor);
+                    const r = anchor.getBoundingClientRect();
+                    const visible = s.display !== 'none' &&
+                      s.visibility !== 'hidden' &&
+                      Number(s.opacity) !== 0 && r.width > 0 && r.height > 0;
+                    out.push({
+                      text: (anchor.getAttribute('aria-label') ||
+                             anchor.getAttribute('title') ||
+                             anchor.innerText || anchor.textContent || '')
+                            .replace(/\s+/g, ' ').trim().slice(0, 300),
+                      href: anchor.href || '',
+                      selector: cssPath(anchor),
+                      index: out.length - 1,
+                      tag: anchor.tagName.toLowerCase(),
+                      actionable: !!clickable && visible,
+                      visible
+                    });
+                  }
+                  return out;
+                }
+                """,
+                pattern,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"Поиск на странице не удался: {exc}"}
 
         return {
             "ok": True,
             "pattern": pattern,
             "matches": matches,
+            "count": len(matches),
         }
 
     async def cmd_find_link(self, params: dict[str, Any]) -> dict[str, Any]:
