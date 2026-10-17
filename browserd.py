@@ -3641,6 +3641,112 @@ class BrowserController:
             ],
         )
 
+    #: Универсальные селекторы поисковой строки для browser_ui_search_box
+    #: (Policy Guard v2.0, Sprint 1). Применяются, если у сайта нет своей
+    #: секции site_search в config/player_selectors.json.
+    _UI_SEARCH_BOX_FALLBACK_SELECTORS = [
+        "input[type='search']",
+        "input[name='search_query']",
+        "input[name='q']",
+        "input[aria-label='Search']",
+        "input[aria-label='Поиск']",
+        "#search",
+        "input#search",
+    ]
+
+    async def cmd_ui_search_box(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Поиск через UI-строку сайта БЕЗ ручного подбора селекторов.
+
+        Находит input[type='search'] (или конфиг сайта), кликает, вводит
+        запрос и нажимает Enter. В отличие от URL-фолбэка site_search,
+        работает через собственную форму сайта и не «прыгает» на /results
+        напрямую (Policy Guard v2.0 / Recovery Injection).
+        """
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return structured_error(
+                "INVALID_PARAMS",
+                "Поисковый запрос не задан (параметр query обязателен)",
+            )
+        page = await self.require_page(params)
+        try:
+            from adapters.base import load_selector_config
+            cfg = load_selector_config() or {}
+        except Exception:  # noqa: BLE001
+            cfg = {}
+
+        site_key = str(params.get("site") or "").strip().lower()
+        if site_key not in cfg:
+            site_key = self._site_key_from_url(page.url)
+        section = cfg.get(site_key) if site_key else None
+        search_cfg = (section or {}).get("site_search") or {}
+        selectors = ([str(x) for x in (search_cfg.get("input_selectors") or [])]
+                     + self._UI_SEARCH_BOX_FALLBACK_SELECTORS)
+
+        budget_ms = 8000
+        with contextlib.suppress(Exception):
+            from modules import timing_config
+            budget_ms = int(timing_config.get(
+                "policy.site_search_budget_ms", 8000) or 8000)
+
+        used_sel = ""
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                await loc.wait_for(state="visible", timeout=1500)
+                await loc.click(timeout=1500)
+                await loc.fill(query, timeout=1500)
+                used_sel = sel
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if not used_sel:
+            return structured_error(
+                "SEARCH_BOX_NOT_FOUND",
+                "Поисковая строка не найдена на странице %s. Проверьте "
+                "секцию site_search в config/player_selectors.json."
+                % page.url,
+                diagnostics={"site": site_key, "query": query},
+                suggested_safe_actions=[
+                    {"tool": "browser_find_interactive_element",
+                     "args": {"pattern": "search"}, "priority": "immediate"},
+                    {"tool": "browser_inspect_page", "args": {}},
+                ],
+            )
+
+        submitted = False
+        for sel in [str(x) for x in (search_cfg.get("button_selectors") or [])]:
+            try:
+                await page.locator(sel).first.click(timeout=1500)
+                submitted = True
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if not submitted:
+            with contextlib.suppress(Exception):
+                await page.keyboard.press("Enter")
+                submitted = True
+
+        url_before = page.url
+        try:
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=min(5000, budget_ms))
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "ok": True,
+            "action": "ui_search_box",
+            "method": "ui_form_fill",
+            "site": site_key or "unknown",
+            "query": query,
+            "selector": used_sel,
+            "submitted": submitted,
+            "url_before": url_before,
+            "url": page.url,
+            "navigated": page.url != url_before,
+            "tab_id": self._page_id(page),
+        }
+
     async def cmd_dialog_state(
         self,
         _params: dict[str, Any],

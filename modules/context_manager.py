@@ -191,10 +191,47 @@ class ContextManager:
     def __init__(self, settings=None):
         self._ctx = BrowserContext()
         self._settings = settings
+        #: Anti-Panic Lock (Policy Guard v2.0, Sprint 3):
+        #: {"until": float, "blocked_tools": tuple[str, ...]} или None.
+        self.panic_lock: Optional[dict] = None
 
     # ------------- basic API -------------
     def get_active_context(self) -> BrowserContext:
         return self._ctx
+
+    # ------------- Anti-Panic Lock (Policy Guard v2.0) -------------
+    def set_panic_lock(self, duration_ms: int = 10000,
+                      blocked_tools: Optional[list] = None) -> None:
+        """Устанавливает временный лок на деструктивные инструменты.
+
+        Срабатывает после INTENT_REDIRECT: агент не должен «сбегать»
+        во внешний поиск (web_search / google-search) или на главную
+        страницу (browser_navigate) — это паническая петля, которая
+        УНИЧТОЖАЕТ контекст текущей страницы (Context Sanctity).
+        """
+        try:
+            duration_s = max(0.0, float(duration_ms) / 1000.0)
+        except (TypeError, ValueError):
+            duration_s = 10.0
+        self.panic_lock = {
+            "until": time.time() + duration_s,
+            "blocked_tools": tuple(blocked_tools) if blocked_tools else tuple(
+                PANIC_LOCK_DEFAULT_TOOLS),
+        }
+
+    def clear_panic_lock(self) -> None:
+        """Снять лок досрочно (например, после успешного recovery-действия)."""
+        self.panic_lock = None
+
+    def is_tool_blocked(self, tool_name: str) -> bool:
+        """Проверяет, заблокирован ли инструмент активным Anti-Panic Lock."""
+        lock = self.panic_lock
+        if not lock:
+            return False
+        if time.time() > lock["until"]:
+            self.panic_lock = None
+            return False
+        return tool_name in lock["blocked_tools"]
 
     def set_settings(self, settings) -> None:
         self._settings = settings
