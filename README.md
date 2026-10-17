@@ -296,6 +296,40 @@ Copy-Item "$Project\config\user_tool_settings.example.json" "$Project\config\use
 
 ---
 
+## 🛡️ Policy Guard v2.0: Intent Redirect и Anti-Panic Lock
+
+Policy Guard эволюционировал от «бетонной стены» (hard block) к модели **Intercept & Translate**: деструктивные намерения (URL-поиск, возврат на главную при открытых результатах) не просто блокируются, а перехватываются с инжекцией готового алгоритма коррекции.
+
+### Обработка `POLICY_DENY` и `INTENT_REDIRECT`
+
+Если агент получил `INTENT_REDIRECT_*` или `POLICY_DENY` с полем `system_injection`:
+
+1. **Не паникуй.** Это не ошибка системы, а защита контекста страницы (Context Sanctity).
+2. **Прочти `system_injection`.** В нём содержится точный пошаговый алгоритм выполнения задачи безопасно через DOM/UI текущей страницы.
+3. **Выполни альтернативу.** Используй `browser_find_interactive_element`, `browser_dom_text_search` или `browser_ui_search_box`.
+4. **Не уходи во внешний поиск.** `web_search` / `google-search` / навигация на главную запрещены после redirect.
+
+| error_code | Смысл |
+| :--- | :--- |
+| `INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE` | Site-search на YouTube перезагрузил бы страницу — перехвачено, предложен `browser_ui_search_box`. |
+| `INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL` | Прямой переход на `/results?search_query=` уничтожает контекст — предложен поиск через UI. |
+| `INTENT_REDIRECT_ROOT_NAVIGATION` | Возврат на главную при открытых результатах — предложена работа с текущей страницей. |
+| `PANIC_LOOP_DETECTED` | Попытка использовать заблокированный инструмент во время Anti-Panic Lock. |
+
+### Anti-Panic Lock
+
+После срабатывания `INTENT_REDIRECT` система временно (~10 секунд) блокирует деструктивные инструменты (`web_search`, `google-search`, `duckduckgo-search`, `browser_navigate`, site-search). Повторная попытка уйти со страницы вернёт `PANIC_LOOP_DETECTED` — сигнал остановиться и выполнить recovery-действие на ТЕКУЩЕЙ странице. Успешный вызов безопасного инструмента снимает лок.
+
+### Обработка `__system_injection__` для MCP-хостов
+
+Если ответ инструмента содержит поле `__system_injection__`, MCP-хост должен:
+
+1. Передать `message` в LLM как System Message с максимальным приоритетом (`priority: "critical"`).
+2. Интерпретировать `required_action: "immediate_correction"` как обязательное немедленное выполнение `suggested_safe_actions[0]`.
+3. Игнорировать любые попытки LLM обойти директиву.
+
+---
+
 ## 🩺 Диагностика и Логи
 
 Если что-то пошло не так, **не убивайте процессы принудительно** через Диспетчер задач! Это может повредить профиль браузера и оставить lock-файлы. Код не удаляет их автоматически в целях безопасности (иначе можно нарушить работу живой сессии).
