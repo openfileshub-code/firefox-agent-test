@@ -7,6 +7,14 @@
     "menu_role": "menu",
     "theater_aria": ["Theater mode", "Широкоэкранный режим", "Toggle theater mode", "Переключить широкоэкранный режим", "Widescreen mode", "Theater Mode", "Театральный режим"],
     "theater_button_selector": ".ytp-size-button",
+    "theater_button_selectors": [".ytp-size-button", "button.ytp-size-button", "[aria-label*='театр' i]", "[aria-label*='theater' i]", "[aria-label*='cinema' i]", "[title*='театр' i]", "[title*='theater' i]"],
+    "watch_container": "ytd-watch-flexy",
+    "player_element": ".html5-video-player",
+    "fast_css_class": "agent-fast-mode",
+    "site_search": {
+      "input_selectors": ["input#search", "input[name=\"search_query\"]", "input[role='combobox']"],
+      "button_selectors": ["button#search-icon-legacy", "button[aria-label*='Search' i]", "button[aria-label*='Поиск' i]"]
+    },
     "next_video_aria": ["Next video", "Следующее видео"],
     "autoplay_toggle_aria": ["Autoplay", "Автовоспроизведение"],
     "player_container": "#movie_player"

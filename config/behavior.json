@@ -1,0 +1,46 @@
+{
+  "_comment": "Тайминг-бюджет и поведенческие параметры по объединённому ТЗ v2.0 (разделы 7-9, 17). Значения — целевые; код читает их через modules/timing_config с дефолтами из этого файла.",
+  "fast_css": {
+    "enabled": true,
+    "class_name": "agent-fast-mode",
+    "auto_remove_after_ms": 800,
+    "force_controls_visible": true,
+    "disable_transitions": true,
+    "disable_animations": true,
+    "keep_fast_mode": false
+  },
+  "timing": {
+    "video_action_soft_target_ms": 800,
+    "video_action_verification_deadline_ms": 1500,
+    "video_action_hard_timeout_ms": 2500,
+    "mcp_tool_hard_timeout_ms": 5000,
+    "element_check_timeout_ms": 300,
+    "state_verify_timeout_ms": 800,
+    "state_poll_interval_ms": 20,
+    "retry_max": 1,
+    "retry_pause_ms": 100
+  },
+  "user_input": {
+    "quiescence_ms": 250,
+    "max_wait_for_quiescence_ms": 300,
+    "abort_on_activity": true,
+    "tracked_events": ["mousemove", "mousedown", "keydown", "wheel", "touchstart"]
+  },
+  "youtube": {
+    "theater_channels": ["keyboard_t", "aria_button", "ytp_size_button", "js_click"],
+    "allow_state_uncertain": true,
+    "no_repeat_after_dispatch": true,
+    "min_confidence_for_toggle": 0.8
+  },
+  "policy": {
+    "max_same_policy_denials": 2,
+    "auto_execute_first_safe_action": false,
+    "return_structured_errors_only": true
+  },
+  "daemon": {
+    "command_hard_timeout_ms": 2500,
+    "heartbeat_interval_ms": 5000,
+    "watchdog_probe_interval_ms": 500,
+    "watchdog_nonblocking": true
+  }
+}

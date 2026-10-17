@@ -66,6 +66,86 @@ class ElementNotFoundError(AdapterError):
         super().__init__(message, **details)
 
 
+# ---------------------------------------------------------------------------
+# Структурированные ошибки объединённого ТЗ v2.0 (§6.5, §10.2, §12)
+#
+# Единый формат отказа: ok:false + error_code + message + diagnostics.
+# Сырые Python-исключения адаптера наружу не выпускаются — диспетчер
+# execute() конвертирует их через to_structured_error().
+# ---------------------------------------------------------------------------
+
+#: Пороги уверенности детектора состояния (ТЗ §11.3).
+CONFIDENCE_TRUSTED = 0.8      # можно выполнять идемпотентные действия
+CONFIDENCE_LOW = 0.5          # ниже — только диагностика
+
+#: Стандартные коды ошибок видеодействий (ТЗ §10.2, §12.1, §13.2, §8.3).
+ERROR_CODES = (
+    "STATE_UNCERTAIN",
+    "STATE_VERIFICATION_UNCERTAIN",
+    "ELEMENT_NOT_FOUND",
+    "USER_INPUT_CONFLICT",
+    "COMMAND_TIMEOUT",
+    "DAEMON_TIMEOUT",
+    "THEATER_STATE_UNKNOWN",
+    "VERIFY_FAILED",
+)
+
+
+def state_is_uncertain(layout: dict | None) -> bool:
+    """True, если снимок layout нельзя считать достоверным для toggle-действия.
+
+    ТЗ §11.3/§10.3: переключающее действие допускается только при
+    confidence >= 0.8; значение theater_mode == 'uncertain' всегда
+    трактуется как неопределённость независимо от confidence.
+    """
+    if not isinstance(layout, dict):
+        return True
+    theater = layout.get("theater_mode")
+    if theater == "uncertain":
+        return True
+    try:
+        conf = float(layout.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return True
+    return conf < CONFIDENCE_TRUSTED
+
+
+def structured_error(error_code: str, message: str, *,
+                     action: str = "", diagnostics: dict | None = None,
+                     **extra: Any) -> dict[str, Any]:
+    """Собирает канонический отказной ответ (ТЗ §6.5, §12.1)."""
+    result: dict[str, Any] = {
+        "ok": False,
+        "error_code": error_code,
+        "message": message,
+    }
+    if action:
+        result["action"] = action
+    if diagnostics is not None:
+        result["diagnostics"] = diagnostics
+    result.update({k: v for k, v in extra.items() if v is not None})
+    return result
+
+
+def to_structured_error(exc: Exception, action: str = "") -> dict[str, Any]:
+    """Маппит внутреннее исключение адаптера в структурированный JSON-ответ.
+
+    ТЗ H7: хост/LLM плохо обрабатывает сырые исключения; вместо traceback
+    возвращается ok:false с error_code и diagnostics.
+    """
+    if isinstance(exc, ElementNotFoundError):
+        code = "ELEMENT_NOT_FOUND"
+    elif isinstance(exc, AdapterError):
+        code = str(exc.details.get("error_code") or "ADAPTER_ERROR")
+    else:
+        code = "ADAPTER_INTERNAL_ERROR"
+    result = structured_error(
+        code, str(exc), action=action,
+        diagnostics=dict(getattr(exc, "details", {}) or {}))
+    result["error"] = type(exc).__name__
+    return result
+
+
 class BaseVideoAdapter:
     """Абстрактный интерфейс видеоплеера.
 
@@ -402,7 +482,47 @@ class BaseVideoAdapter:
                 ).strip()
             return result
 
-        result = await handler()
+        # Единый жёсткий бюджет видеокоманды (ТЗ §7.2, R3): вместо
+        # «висящих» десятков секунд — структурированный COMMAND_TIMEOUT.
+        import time as _time
+
+        from modules.timing_config import get as _tget
+
+        hard_ms = float(_tget("timing.video_action_hard_timeout_ms", 2500))
+        started = _time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                handler(), timeout=hard_ms / 1000.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "adapter_video action=%s duration_ms=%d ok=false "
+                "error_code=COMMAND_TIMEOUT hard_timeout_ms=%d",
+                action, int((_time.monotonic() - started) * 1000), int(hard_ms))
+            return structured_error(
+                "COMMAND_TIMEOUT",
+                "Видеодействие '%s' не уложилось в жёсткий бюджет %.0f мс; "
+                "операция отменена, состояние страницы могло измениться — "
+                "проверьте layout_state/state перед повтором." % (
+                    action, hard_ms),
+                action=action,
+                diagnostics={
+                    "hard_timeout_ms": hard_ms,
+                    "elapsed_ms": int((_time.monotonic() - started) * 1000),
+                })
+        except AdapterError as exc:
+            # ТЗ H7/§6.5: сырые исключения адаптера наружу не уходим —
+            # конвертируем в структурированный JSON с диагностикой.
+            elapsed = int((_time.monotonic() - started) * 1000)
+            logger.warning(
+                "adapter_video action=%s duration_ms=%d ok=false error_code=%s",
+                action, elapsed,
+                to_structured_error(exc, action).get("error_code"))
+            result = to_structured_error(exc, action)
+            result.setdefault("diagnostics", {})
+            if isinstance(result["diagnostics"], dict):
+                result["diagnostics"].setdefault("duration_ms", elapsed)
+            if action == "detect_login":
+                raise
         if action == "detect_login":
             result = {"ok": True, "login_required": bool(result), "adapter": type(self).__name__}
         if isinstance(result, dict):
