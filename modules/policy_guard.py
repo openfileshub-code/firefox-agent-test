@@ -31,6 +31,7 @@ RULE_SOURCES = {
     "POLICY_PLACEHOLDER_URL_FORBIDDEN": "SKILL.md §Запрет placeholder-URL",
     "POLICY_INVALID_YOUTUBE_VIDEO_ID": "SKILL.md §Запрет placeholder-URL",
     "POLICY_EVAL_VIDEO_FORBIDDEN": "SKILL.md §Видео",
+    "POLICY_LOOP_DETECTED": "SKILL.md §Повторы",
     "POLICY_THEATER_NOT_FULLSCREEN": "SKILL.md §Театральный режим YouTube",
     "POLICY_HIDDEN_ELEMENT_REQUIRES_EXPAND": "SKILL.md §Обработка скрытых элементов",
     "POLICY_BLIND_RETRY_FORBIDDEN": "SKILL.md §Повторы",
@@ -124,6 +125,51 @@ class PolicyGuard:
         # переспрашивание пользователя (фидбек: «агент не может открыть сайт»).
         self._newtab_deny_at: dict = {}
         self._NEWTAB_DEDUPE_SECONDS = 20
+        # ТЗ §15 (C7): анти-цикл по denial'ам. Счётчик одинаковых отказанных
+        # вызовов (tool, error_code, аргументы). После max_same_policy_denials
+        # подряд срабатывает POLICY_LOOP_DETECTED — жёсткая остановка,
+        # запрещающая агенту дальше повторять тот же прогон.
+        self._deny_streak: dict = {}
+        self._DENY_STREAK_WINDOW_SECONDS = 60
+
+    # ------------------------------------------------------------------
+    def _max_denials(self) -> int:
+        try:
+            from modules import timing_config
+            return int(timing_config.get("policy.max_same_policy_denials", 2))
+        except Exception:  # noqa: BLE001
+            return 2
+
+    def _record_denial(self, tool: str, args: dict, code: str) -> None:
+        """Учитывает deny; при превышении бюджета возвращает True (цикл)."""
+        import json as _json
+        import time as _time
+
+        key = (tool, code, _json.dumps(
+            {k: v for k, v in (args or {}).items()
+             if not str(k).startswith("__")},
+            sort_keys=True, default=str)[:200])
+        now = _time.monotonic()
+        prev_at, prev_count = self._deny_streak.get(key, (0.0, 0))
+        count = prev_count + 1 if now - prev_at < self._DENY_STREAK_WINDOW_SECONDS else 1
+        self._deny_streak[key] = (now, count)
+        return count > self._max_denials()
+
+    def _loop_detected(self, tool: str, args: dict, code: str,
+                       message: str = "", suggestions: Optional[list] = None,
+                       ) -> "PolicyDecision":
+        """ТЗ §15: жёсткий стоп-сигнал после повторяющихся отказов."""
+        log.warning("PolicyGuard LOOP: %s (%s) — повторы отказов исчерпали бюджет",
+                    tool, code)
+        return _deny(
+            "POLICY_LOOP_DETECTED", tool, args,
+            message=message or (
+                "Обнаружен цикл: один и тот же вызов %s отклонён политикой "
+                "более допустимого числа раз. Прекрати повторять это действие; "
+                "выбери другой инструмент из suggested_safe_actions или сообщи "
+                "пользователю о блокировке." % tool),
+            suggestions=suggestions or [],
+            confirmation=False)
 
     def _allow_inplace_navigation(self, args: dict) -> PolicyDecision:
         """Внутренне переписать запрещённый new_tab на навигацию в текущей вкладке."""
