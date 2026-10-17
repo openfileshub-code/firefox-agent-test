@@ -26,6 +26,8 @@ log = logging.getLogger("FirefoxMCP_PolicyGuard")
 RULE_SOURCES = {
     "POLICY_SAME_TAB_REQUIRED": "SKILL.md §Жёсткая политика вкладок",
     "POLICY_NEW_TAB_NOT_ALLOWED": "SKILL.md §Жёсткая политика вкладок",
+    "POLICY_USE_HISTORY_BACK": "SKILL.md §Навигация по истории («назад»)",
+    "POLICY_DESTRUCTIVE_RELOAD_FORBIDDEN": "SKILL.md §Запрет деструктивных перезагрузок",
     "POLICY_SITE_SEARCH_NOT_REQUESTED": "SKILL.md §Поиск на сайте",
     "POLICY_SCROLL_NOT_REQUESTED": "SKILL.md §Обработка скрытых элементов",
     "POLICY_PLACEHOLDER_URL_FORBIDDEN": "SKILL.md §Запрет placeholder-URL",
@@ -67,6 +69,38 @@ VIDEO_MUTATION_ACTIONS = {
 }
 EPISODE_ACTIONS = {"episode_list", "episode_next", "episode_prev",
                    "episode_open", "chapter_list", "chapter_seek"}
+
+#: page_type, при которых перезагрузка/переход на корень сайта уничтожает
+#: рабочий контекст (DOM, кэш, результаты поиска) — ТЗ блок 7.
+DESTRUCTIVE_PAGE_TYPES = {"watch", "search", "search_results"}
+
+
+def _norm_host(host: str) -> str:
+    """Канонический hostname без scheme/port и префикса 'www.'."""
+    h = str(host or "").strip().lower()
+    h = h.removeprefix("http://").removeprefix("https://")
+    h = h.split("/")[0].split(":")[0]
+    return h.removeprefix("www.")
+
+
+def _history_back_suggestion(url: str = "") -> dict:
+    """Готовое немедленное действие «назад по истории» (ТЗ 6.3)."""
+    sug = {"tool": "browser_history_back", "args": {},
+           "auto_retry": True, "priority": "immediate"}
+    if url:
+        sug["reason"] = "Возврат по истории вместо browser_navigate на %s" % url
+    return sug
+
+
+def _search_page_suggestion(pattern: str, reason: str = "") -> dict:
+    """Готовый немедленный browser_search_on_page с извлечённым pattern
+    (ТЗ 2.3/2.4) и флагом приоритета немедленного выполнения (ТЗ 2.4)."""
+    sug = {"tool": "browser_search_on_page",
+           "args": {"pattern": pattern},
+           "priority": "immediate", "auto_retry": True}
+    if reason:
+        sug["reason"] = reason
+    return sug
 
 
 @dataclass
@@ -212,29 +246,36 @@ class PolicyGuard:
         phrase = args.get("override_phrase")
         if phrase and s.phrase_matches("allow_site_search", phrase):
             return None
+        q = _query_from(url)
         if virtual_forbidden:
             code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
             message = (
                 "ОШИБКА: Переход на страницу выдачи сайта запрещён политикой "
                 "(browser_navigate_to_search_url в forbidden_tools). ЗАПРЕЩЕНО "
-                "повторять этот заблокированный вызов. Немедленно выполни "
-                "первое действие из suggested_safe_actions в этом же ходе.")
+                "повторять этот заблокированный вызов и конструировать URL "
+                "поиска вручную. НЕМЕДЛЕННО вызови browser_search_on_page с "
+                "pattern='%s' (первое действие из suggested_safe_actions) в "
+                "этом же ходе, затем перейди по href найденной ссылки." % q)
         elif not global_allowed:
             code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
             message = (
                 "Поиск на сайте (URL выдачи) не разрешён: allow_site_search="
                 "false. Требуется явная фраза пользователя override_phrase. "
                 "ЗАПРЕЩЕНО повторять этот заблокированный вызов и конструировать "
-                "URL поиска вручную — немедленно выполни первое действие из "
-                "suggested_safe_actions в этом же ходе.")
+                "URL поиска вручную — НЕМЕДЛЕННО вызови browser_search_on_page "
+                "с pattern='%s' (первое действие из suggested_safe_actions) "
+                "в этом же ходе." % q)
         else:
             return None
-        q = _query_from(url)
+        # ТЗ 2.3/2.4/3.5: первым suggestion — готовый browser_search_on_page
+        # с извлечённым из URL pattern и флагом priority="immediate"
+        # (немедленное выполнение без переспрашивания пользователя).
         return _deny(
             code, tool, args, message=message,
-            suggestions=[{"tool": "browser_find_link", "args": {"pattern": q}},
-                         {"tool": "browser_search_on_page",
-                          "args": {"pattern": q}}])
+            suggestions=[_search_page_suggestion(
+                q, "Поиск текста на ТЕКУЩЕЙ странице вместо URL выдачи"),
+                         {"tool": "browser_find_link", "args": {"pattern": q},
+                          "priority": "immediate"}])
 
     def check_site_search_policy(self, query: str, override_phrase=None,
                                  site: str = "", context=None):
@@ -263,26 +304,31 @@ class PolicyGuard:
         if virtual_forbidden:
             message = (
                 "ОШИБКА: Поиск на сайте (переход на страницу выдачи) "
-                "запрещён политикой сайта. Передай browser_site_search "
-                "дословную фразу пользователя в override_phrase (например "
-                "«найди на ютубе %s»), иначе работай по DOM текущей "
-                "страницы. ЗАПРЕЩЕНО повторять этот заблокированный вызов "
-                "без override_phrase и запрещено конструировать URL поиска "
-                "через browser_navigate. Немедленно выполни первое действие "
-                "из suggested_safe_actions в этом же ходе." % query)
+                "запрещён политикой сайта. НЕМЕДЛЕННО вызови "
+                "browser_search_on_page с pattern='%s' (первое действие из "
+                "suggested_safe_actions). ЗАПРЕЩЕНО повторять заблокированный "
+                "вызов browser_site_search без override_phrase, ЗАПРЕЩЕНО "
+                "конструировать URL поиска через browser_navigate и ЗАПРЕЩЕНО "
+                "сдаваться — выполни первое действие из suggested_safe_actions "
+                "в этом же ходе." % query)
         else:
             message = (
                 "Поиск на сайте не разрешён: allow_site_search=false. "
                 "Требуется дословная фраза пользователя в override_phrase. "
-                "ЗАПРЕЩЕНО повторять этот заблокированный вызов. Немедленно "
-                "выполни первое действие из suggested_safe_actions в этом же "
-                "ходе.")
+                "НЕМЕДЛЕННО вызови browser_search_on_page с pattern='%s' "
+                "(первое действие из suggested_safe_actions). ЗАПРЕЩЕНО "
+                "повторять этот заблокированный вызов и ЗАПРЕЩЕНО сдаваться."
+                % query)
+        # ТЗ 2.3/2.4/3.5: готовый browser_search_on_page с извлечённым
+        # pattern ПЕРВЫМ + флаг немедленного выполнения priority="immediate".
         return _deny(
             "POLICY_SITE_SEARCH_NOT_REQUESTED", tool, args,
             message=message,
             suggestions=[
-                {"tool": "browser_search_on_page", "args": {"pattern": query}},
-                {"tool": "browser_find_link", "args": {"pattern": query}},
+                _search_page_suggestion(
+                    query, "Поиск текста на ТЕКУЩЕЙ странице (без URL выдачи)"),
+                {"tool": "browser_find_link", "args": {"pattern": query},
+                 "priority": "immediate"},
                 {"tool": "browser_get_context", "args": {}},
             ])
 
@@ -435,14 +481,12 @@ class PolicyGuard:
                 }
             return _deny(
                 "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
-                message="browser_new_tab требует override-фразу пользователя "
-                        "(например «открой в новой вкладке»). ЗАПРЕЩЕНО "
-                        "повторять этот заблокированный вызов. Немедленно "
-                        "выполни первое действие из suggested_safe_actions в "
-                        "этом же ходе: если пользователь сказал просто "
-                        "«открой <сайт>» — повтори операцию через "
-                        "browser_navigate в текущей вкладке (suggestion с "
-                        "auto_retry), не переспрашивая его.",
+                message="НОВАЯ ВКЛАДКА ЗАПРЕЩЕНА. Браузер уже открыт. "
+                        "НЕМЕДЛЕННО вызови browser_navigate(url='%s', "
+                        "new_tab=False) — первое действие из "
+                        "suggested_safe_actions (priority='immediate'). "
+                        "ЗАПРЕЩЕНО повторять browser_new_tab и ЗАПРЕЩЕНО "
+                        "переспрашивать пользователя." % url_arg,
                 suggestions=([] if nav_suggestion is None else [nav_suggestion])
                             + [{"tool": "browser_find_link",
                                 "args": {"pattern": ""}}],
