@@ -586,6 +586,14 @@ async def call(command: str, params: Optional[dict] = None, *,
         else:
             command, params = "new_tab", params or {}
 
+    # ТЗ 6.3: фиксация истории посещений вкладки ДО фактической навигации —
+    # текущий URL попадает в url_history, и guard сможет отличить возврат
+    # на уже посещённую страницу (POLICY_USE_HISTORY_BACK) от перехода
+    # вперёд. Запись только для навигации текущей вкладки (не new_tab).
+    if command == "navigate" and not check_args.get("new_tab"):
+        CONTEXT_MANAGER.note_pending_navigation(
+            str(check_args.get("url") or (params or {}).get("url") or ""))
+
     # ТЗ §15.4 (C6): site search через форму сайта. URL-фолбэк для YouTube
     # выполняется демоном как навигация на выдачу — политический контроль
     # виртуального инструмента browser_navigate_to_search_url применяется
@@ -677,6 +685,14 @@ async def call(command: str, params: Optional[dict] = None, *,
             result = {**result, "ok": False}
         if command in _CONTEXT_COMMANDS:
             CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+            # ТЗ 6.3: после успешной навигации зафиксировать целевой URL в
+            # url_history вкладки (источник данных для POLICY_USE_HISTORY_BACK).
+            if (command == "navigate" and isinstance(result, dict)
+                    and result.get("ok", True)):
+                CONTEXT_MANAGER.record_visited_url(
+                    str(result.get("url")
+                        or check_args.get("url")
+                        or (params or {}).get("url") or ""))
     # ТЗ §12.2 (этап 7): per-call лог в формате ключ-значение.
     ok = bool(result.get("ok")) if isinstance(result, dict) else True
     err_code = (result.get("error_code") or result.get("error") or "") \
@@ -1012,6 +1028,37 @@ async def browser_schedule_action(
     Состояния: armed -> fired | canceled | skipped_context | inactive
     (закрытие вкладки). Список/статусы — browser_list_schedules.
     """
+    # ТЗ 5.3: LLM нередко передаёт payload/options как JSON-строки —
+    # безопасно приводим к dict ДО вызова демона (демон делает то же
+    # через _coerce_dict, но структурированный отказ здесь понятнее).
+    def _coerce_mapping(value, name):
+        if value is None or isinstance(value, dict):
+            return value or {}
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    payload = _coerce_mapping(payload, "payload")
+    options = _coerce_mapping(options, "options")
+    if payload is None or options is None:
+        bad = "payload" if payload is None else "options"
+        return {
+            "ok": False,
+            "error_code": "VALUE_REQUIRED",
+            "message": ("Параметр '%s' должен быть словарём или корректной "
+                        "JSON-строкой объекта (например '{\"url\": \"https://"
+                        "...\"}'). ЗАПРЕЩЕНО повторять вызов с тем же "
+                        "некорректным значением — исправь формат." % bad),
+        }
+
     params: Dict[str, Any] = {
         "trigger": trigger,
         "action": action,

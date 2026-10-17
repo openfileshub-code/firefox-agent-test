@@ -475,10 +475,13 @@ class PolicyGuard:
             url_arg = str(args.get("url") or "")
             nav_suggestion = None
             if url_arg.startswith(("http://", "https://")):
+                # ТЗ 8.3: навигационное suggestion обязано нести флаги
+                # немедленного автоповтора без переспрашивания пользователя.
                 nav_suggestion = {
                     "tool": "browser_navigate",
                     "args": {"url": url_arg, "new_tab": False},
                     "auto_retry": True,
+                    "priority": "immediate",
                 }
             return _deny(
                 "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
@@ -513,10 +516,14 @@ class PolicyGuard:
         nav_suggestion = None
         url_arg = str(args.get("url") or "")
         if url_arg.startswith(("http://", "https://")):
+            # ТЗ 8.3: флаг немедленного автоповтора обязателен — агент
+            # обязан исполнить browser_navigate в этом же ходе без
+            # переспрашивания («в новой вкладке или текущей?»).
             nav_suggestion = {
                 "tool": "browser_navigate",
                 "args": {"url": url_arg, "new_tab": False},
                 "auto_retry": True,
+                "priority": "immediate",
             }
         suggestions = ([] if nav_suggestion is None else [nav_suggestion]) + [
             {"tool": "browser_find_link", "args": {"pattern": ""}},
@@ -524,14 +531,13 @@ class PolicyGuard:
         ]
         return _deny(
             "POLICY_NEW_TAB_NOT_ALLOWED", tool, args,
-            message="Новая вкладка запрещена: работайте в текущей вкладке. "
-                    "Разрешение — только по явной фразе пользователя. "
-                    "ЗАПРЕЩЕНО повторять этот заблокированный вызов. "
-                    "Немедленно выполни первое действие из "
-                    "suggested_safe_actions в этом же ходе: если пользователь "
-                    "сказал просто «открой <сайт>» — повтори операцию через "
-                    "browser_navigate в текущей вкладке (suggestion с "
-                    "auto_retry).",
+            message="НОВАЯ ВКЛАДКА ЗАПРЕЩЕНА. Браузер уже открыт. "
+                    "НЕМЕДЛЕННО вызови browser_navigate(url='%s', "
+                    "new_tab=False) — первое действие из "
+                    "suggested_safe_actions (priority='immediate'). "
+                    "ЗАПРЕЩЕНО повторять browser_new_tab и ЗАПРЕЩЕНО "
+                    "переспрашивать пользователя «в новой вкладке или "
+                    "текущей?»." % url_arg,
             suggestions=suggestions,
             confirmation=False)
 

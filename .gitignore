@@ -1,1 +1,4 @@
-patches/
+__pycache__/
+*.pyc
+logs/
+*.log
