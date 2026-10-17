@@ -50,9 +50,12 @@ class LinkCandidate:
     position: int = 0
     score: float = 0.0
     matched_terms: list[str] = field(default_factory=list)
+    selector: str = ""
+    index: int = -1
+    actionable: Optional[bool] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "candidate_id": self.candidate_id,
             "text": self.text,
             "href": self.href,
@@ -64,6 +67,16 @@ class LinkCandidate:
             "score": round(self.score, 4),
             "matched_terms": self.matched_terms,
         }
+        # ТЗ §15.2 (C6): кликабельные метаданные — selector/index/actionable
+        # передаются наружу, только если реально известны (обратная
+        # совместимость со старыми ответами inventory/live_dom).
+        if self.selector:
+            d["selector"] = self.selector
+        if self.index >= 0:
+            d["index"] = self.index
+        if self.actionable is not None:
+            d["actionable"] = self.actionable
+        return d
 
 
 class RelevanceRanker:
@@ -95,6 +108,10 @@ class RelevanceRanker:
                                  or item.get("element_type") or ""),
                 visible=bool(item.get("visible", True)),
                 source=source, position=int(item.get("position", idx)),
+                selector=str(item.get("selector", "") or ""),
+                index=int(item.get("index", idx)),
+                actionable=(bool(item["actionable"])
+                            if "actionable" in item else None),
             )
             if not q_clean:
                 c.score = 0.0 if not c.visible else 0.1
