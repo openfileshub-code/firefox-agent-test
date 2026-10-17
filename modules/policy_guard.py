@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -35,6 +36,15 @@ RULE_SOURCES = {
     "POLICY_INVALID_YOUTUBE_VIDEO_ID": "SKILL.md §Запрет placeholder-URL",
     "POLICY_EVAL_VIDEO_FORBIDDEN": "SKILL.md §Видео",
     "POLICY_LOOP_DETECTED": "SKILL.md §Повторы",
+    # Policy Guard v2.0: перехват намерения + анти-паника (Sprint 2/3)
+    "INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE":
+        "SKILL.md §Протокол восстановления после Intent Redirect",
+    "INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL":
+        "SKILL.md §Протокол восстановления после Intent Redirect",
+    "INTENT_REDIRECT_ROOT_NAVIGATION":
+        "SKILL.md §Неприкосновенность контекста (Context Sanctity)",
+    "PANIC_LOOP_DETECTED":
+        "SKILL.md §Anti-Panic Lock",
     "POLICY_THEATER_NOT_FULLSCREEN": "SKILL.md §Театральный режим YouTube",
     "POLICY_HIDDEN_ELEMENT_REQUIRES_EXPAND": "SKILL.md §Обработка скрытых элементов",
     "POLICY_BLIND_RETRY_FORBIDDEN": "SKILL.md §Повторы",
@@ -104,6 +114,21 @@ def _search_page_suggestion(pattern: str, reason: str = "") -> dict:
     return sug
 
 
+class PolicyVerdict(Enum):
+    """Policy Guard v2.0: три уровня вердикта.
+
+    ALLOWED                — действие разрешено;
+    BLOCKED                — классический deny (обратная совместимость);
+    INTENT_REDIRECT        — перехват намерения: вместо «стены» агент
+                             получает system_injection с точным алгоритмом
+                             коррекции (Recovery Injection).
+    """
+
+    ALLOWED = "allowed"
+    BLOCKED = "blocked"
+    INTENT_REDIRECT = "intent_redirect"
+
+
 @dataclass
 class PolicyDecision:
     allowed: bool
@@ -114,9 +139,22 @@ class PolicyDecision:
     suggested_safe_actions: list = field(default_factory=list)
     requires_user_confirmation: bool = False
     message: str = ""
+    #: Recovery Injection (v2.0): директива для LLM с максимальным
+    #: приоритетом; передаётся MCP-хосту как __system_injection__.
+    system_injection: str = ""
+    #: вердикт v2.0 (INTENT_REDIRECT вместо plain BLOCKED)
+    verdict: PolicyVerdict = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.verdict is None:
+            self.verdict = (PolicyVerdict.ALLOWED if self.allowed
+                            else PolicyVerdict.BLOCKED)
 
     def to_dict(self) -> dict:
-        d: dict[str, Any] = {"allowed": self.allowed}
+        d: dict[str, Any] = {
+            "allowed": self.allowed,
+            "verdict": self.verdict.value,
+        }
         if not self.allowed:
             d.update({
                 "error_code": self.error_code,
@@ -128,6 +166,15 @@ class PolicyDecision:
                 "requires_user_confirmation": self.requires_user_confirmation,
                 "message": self.message,
             })
+            if self.system_injection:
+                d["system_injection"] = self.system_injection
+                # Формат для MCP-хостов (Unsloth/Claude Desktop): поле
+                # интерпретируется как System Message следующего хода.
+                d["__system_injection__"] = {
+                    "priority": "critical",
+                    "message": self.system_injection,
+                    "required_action": "immediate_correction",
+                }
         return d
 
 
@@ -141,6 +188,25 @@ def _deny(code: str, tool: str, args: dict, message: str = "",
         suggested_safe_actions=suggestions or [],
         requires_user_confirmation=confirmation,
         message=message or code,
+    )
+
+
+def _redirect(code: str, tool: str, args: dict, system_injection: str,
+              suggestions: Optional[list] = None,
+              message: str = "") -> PolicyDecision:
+    """Policy Guard v2.0: перехват намерения (Intercept & Translate).
+
+    Вместо «стены» агент получает system_injection — директиву коррекции
+    с максимальным приоритетом и готовые suggested_safe_actions."""
+    return PolicyDecision(
+        allowed=False,
+        verdict=PolicyVerdict.INTENT_REDIRECT,
+        error_code=code,
+        rule_source=RULE_SOURCES.get(code, ""),
+        attempted_tool=tool, attempted_args=args or {},
+        suggested_safe_actions=suggestions or [],
+        message=message or system_injection,
+        system_injection=system_injection,
     )
 
 
@@ -332,6 +398,148 @@ class PolicyGuard:
                  "priority": "immediate"},
                 {"tool": "browser_get_context", "args": {}},
             ])
+
+    # ------------------------------------------------------------------
+    # Policy Guard v2.0: Intercept & Translate (Sprint 2)
+    # ------------------------------------------------------------------
+    def evaluate_intent(self, tool_name: str, args: dict,
+                        context: Optional[dict] = None) -> PolicyDecision:
+        """Оценивает НАМЕРЕНИЕ агента до классических hard-rules.
+
+        Вместо возврата сухого `suggested_safe_actions` guard генерирует
+        `system_injection` — директиву коррекции с максимальным приоритетом
+        для LLM (Recovery Injection). Возвращает PolicyDecision с вердиктом:
+          * INTENT_REDIRECT — действие деструктивно для контекста, перехват;
+          * ALLOWED         — обычный путь (далее исполняется check()).
+        """
+        args = args or {}
+        if context is None:
+            ctx = self.context()
+            current_url = getattr(ctx, "url", "") or "" if ctx else ""
+        else:
+            current_url = str(context.get("current_url")
+                              or context.get("url") or "")
+
+        # Случай 1: site search на YouTube — URL-фолбэк /results?search_query=
+        # ПЕРЕЗАГРУЖАЕТ страницу и УНИЧТОЖАЕТ текущие результаты.
+        if tool_name in ("browser_site_search",
+                         "browser_navigate_to_search_results"):
+            site = str(args.get("site") or "").lower()
+            query = str(args.get("query") or "")
+            s = self.settings
+            phrase = args.get("override_phrase")
+            allowed_by_phrase = bool(
+                phrase and s.phrase_matches("allow_site_search", phrase))
+            if (site == "youtube" or "youtube" in current_url.lower()) \
+                    and not allowed_by_phrase:
+                return _redirect(
+                    "INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE",
+                    tool_name, args,
+                    system_injection=(
+                        "[SYSTEM POLICY OVERRIDE]: %s на YouTube выполняет "
+                        "ПЕРЕХОД ПО URL на /results?search_query=, что "
+                        "ПЕРЕЗАГРУЖАЕТ страницу и УНИЧТОЖАЕТ текущие "
+                        "результаты. Пользователь просит найти видео НА "
+                        "ТЕКУЩЕЙ СТРАНИЦЕ. ТВОЙ АЛГОРИТМ:\n"
+                        "1. Вызови browser_ui_search_box(query='%s') для "
+                        "ввода запроса в поисковую строку YouTube.\n"
+                        "2. Дождись загрузки результатов.\n"
+                        "3. Используй browser_find_interactive_element("
+                        "pattern='%s') для клика по нужному видео.\n"
+                        "ЗАПРЕЩЕНО использовать web_search, google-search "
+                        "или browser_navigate."
+                        % (tool_name, query, query)),
+                    suggestions=[
+                        {"tool": "browser_ui_search_box",
+                         "args": {"query": query},
+                         "priority": "immediate", "auto_retry": True},
+                        {"tool": "browser_find_interactive_element",
+                         "args": {"pattern": query},
+                         "priority": "secondary"},
+                    ])
+
+        # Случай 2: browser_navigate на поисковый URL выдачи
+        if tool_name in ("browser_navigate", "browser_new_tab"):
+            url = str(args.get("url") or "")
+            if ("search_query=" in url or "/results" in url) \
+                    and uv.is_search_results_url(url):
+                q = _query_from(url)
+                return _redirect(
+                    "INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL",
+                    tool_name, args,
+                    system_injection=(
+                        "[SYSTEM POLICY OVERRIDE]: Прямой переход на URL "
+                        "поиска ('%s') запрещён, так как это ПЕРЕЗАГРУЖАЕТ "
+                        "страницу и УНИЧТОЖАЕТ контекст текущей страницы. "
+                        "Используй browser_ui_search_box(query='%s') для "
+                        "поиска через UI сайта, затем "
+                        "browser_find_interactive_element(pattern='%s'). "
+                        "ЗАПРЕЩЕНО использовать web_search или повторять "
+                        "browser_navigate." % (url, q, q)),
+                    suggestions=[
+                        {"tool": "browser_ui_search_box",
+                         "args": {"query": q},
+                         "priority": "immediate", "auto_retry": True},
+                        {"tool": "browser_find_interactive_element",
+                         "args": {"pattern": q}, "priority": "secondary"},
+                    ])
+
+            # Случай 3: browser_navigate на главную страницу текущего сайта
+            # при активном watch/search контексте (потеря результатов).
+            if tool_name == "browser_navigate" and self._is_root_navigation(
+                    current_url, url):
+                return _redirect(
+                    "INTENT_REDIRECT_ROOT_NAVIGATION",
+                    tool_name, args,
+                    system_injection=(
+                        "[SYSTEM POLICY OVERRIDE]: Переход на главную "
+                        "страницу запрещён, так как это УНИЧТОЖИТ текущие "
+                        "результаты поиска (Context Sanctity). Продолжай "
+                        "работу на текущей странице через "
+                        "browser_find_interactive_element или "
+                        "browser_dom_text_search. ЗАПРЕЩЕНО использовать "
+                        "web_search и повторять browser_navigate."),
+                    suggestions=[
+                        {"tool": "browser_find_interactive_element",
+                         "args": {"pattern": ""},
+                         "priority": "immediate", "auto_retry": True},
+                        {"tool": "browser_dom_text_search",
+                         "args": {"pattern": ""}, "priority": "secondary"},
+                    ])
+
+        return PolicyDecision(verdict=PolicyVerdict.ALLOWED, allowed=True)
+
+    # ------------------------------------------------------------------
+    # Вспомогательные функции v2.0
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_query_from_url(url: str) -> str:
+        """Извлекает search_query из URL поиска."""
+        return _query_from(url)
+
+    def _is_root_navigation(self, current_url: str, target_url: str) -> bool:
+        """Проверяет, является ли переход возвратом на главную того же
+        сайта при активном поисковом/просмотровом контексте."""
+        if not current_url or not target_url:
+            return False
+        try:
+            cur_parsed = urlparse(current_url)
+            tgt_parsed = urlparse(target_url)
+        except ValueError:
+            return False
+        if not tgt_parsed.netloc:
+            return False
+        cur_host = _norm_host(cur_parsed.netloc)
+        tgt_host = _norm_host(tgt_parsed.netloc)
+        if not cur_host or cur_host != tgt_host:
+            return False
+        cur_path = (cur_parsed.path or "/").strip("/")
+        destructive_ctx = any(m in cur_path for m in
+                              ("results", "watch", "shorts")) \
+            or "search_query" in (cur_parsed.query or "") \
+            or "v=" in (cur_parsed.query or "")
+        tgt_path = (tgt_parsed.path or "/").strip("/")
+        return destructive_ctx and tgt_path == ""
 
     # ------------------------------------------------------------------
     @property
@@ -927,5 +1135,6 @@ def _query_from(url: str) -> str:
     return ""
 
 
-__all__ = ["PolicyGuard", "PolicyDecision", "RULE_SOURCES",
+__all__ = ["PolicyGuard", "PolicyDecision", "PolicyVerdict", "_redirect",
+           "RULE_SOURCES",
            "VIDEO_MUTATION_ACTIONS", "EPISODE_ACTIONS"]

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse, parse_qs
@@ -26,6 +27,18 @@ SAME_TAB_BLOCKED_TOOLS = (
     "browser_new_tab",
     "browser_switch_tab",
     "browser_navigate_to_search_url",
+)
+
+#: Anti-Panic Lock (Policy Guard v2.0, Sprint 3): инструменты, временно
+#: блокируемые после INTENT_REDIRECT, чтобы агент не ушёл в паническую
+#: петлю («сбежать» во внешний поиск или на главную страницу).
+PANIC_LOCK_DEFAULT_TOOLS = (
+    "web_search",
+    "google-search",
+    "duckduckgo-search",
+    "browser_site_search",
+    "browser_navigate_to_search_results",
+    "browser_navigate",
 )
 
 
