@@ -152,6 +152,10 @@ class PolicyDecision:
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {
+            # MCP-хосты (Unsloth/Claude Desktop) читают именно `ok` как
+            # признак успеха вызова; `allowed` оставлен для обратной
+            # совместимости со старыми потребителями middleware.
+            "ok": self.allowed,
             "allowed": self.allowed,
             "verdict": self.verdict.value,
         }

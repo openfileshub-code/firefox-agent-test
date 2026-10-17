@@ -537,6 +537,11 @@ async def call(command: str, params: Optional[dict] = None, *,
     # деструктивные инструменты (web_search / browser_navigate на главную /
     # URL-выдача) временно заблокированы, чтобы агент не ушёл в паническую
     # петлю и не УНИЧТОЖИЛ контекст страницы (Context Sanctity).
+    # Лок — защита от ПОВТОРНОЙ попытки в течение короткого окна; успешный
+    # вызов другой команды означает, что агент выполнил recovery-действие
+    # (или смена контекста), поэтому лок снимается до первой же команды,
+    # не входящей в список блокируемых. Иначе состояние глобального
+    # CONTEXT_manager протекало бы между независимыми tool calls.
     if CONTEXT_MANAGER.is_tool_blocked(tool_name):
         log.info("Anti-Panic lock: %s blocked (PANIC_LOOP_DETECTED)",
                  tool_name)
@@ -584,6 +589,12 @@ async def call(command: str, params: Optional[dict] = None, *,
         AUDIT.record(tool_name, check_args, decision=panic, result=panic,
                      context=CONTEXT_MANAGER.get_active_context().to_public_dict())
         return panic
+
+    # Recovery-путь пройден: агент вызвал безопасный инструмент
+    # (browser_ui_search_box / browser_find_interactive_element / клик по
+    # ссылке) — лок больше не нужен, иначе он «протёк» бы в последующие
+    # легитимные tool calls.
+    CONTEXT_MANAGER.clear_panic_lock()
 
     # Policy Guard v2.0 (Sprint 2): Intercept & Translate. Перехватываем
     # деструктивные НАМЕРЕНИЯ до классических hard-rules и возвращаем
