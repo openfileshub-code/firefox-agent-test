@@ -29,6 +29,7 @@ from modules.settings_loader import (                        # noqa: E402
 from modules import url_validator as uv                      # noqa: E402
 from modules.relevance_ranker import RelevanceRanker          # noqa: E402
 from modules.audit_logger import get_audit_logger             # noqa: E402
+from modules import timing_config                             # noqa: E402
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -618,9 +619,46 @@ async def call(command: str, params: Optional[dict] = None, *,
                          context=CONTEXT_MANAGER.get_active_context().to_public_dict())
             return result
 
-    result = await connector.send(command, params)
+    # ТЗ §12/§14 (этап 7): жёсткий MCP-потолок на каждый tool call.
+    # Потолок = max(mcp_tool_hard_timeout_ms из behavior.json, штатный
+    # таймаут команды). Дольше потолка ждать нельзя: агент обязан получить
+    # структурированный COMMAND_TIMEOUT с state_uncertain вместо зависания.
+    ceiling_ms = timing_config.get("timing.mcp_tool_hard_timeout_ms", 5000)
+    try:
+        ceiling_ms = float(ceiling_ms)
+    except (TypeError, ValueError):
+        ceiling_ms = 5000.0
+    base_timeout = TIMEOUTS.get(command, TIMEOUTS["default"])
+    hard_timeout = max(ceiling_ms / 1000.0, float(base_timeout))
+    started = time.perf_counter()
+    try:
+        result = await asyncio.wait_for(
+            connector.send(command, params), timeout=hard_timeout)
+    except asyncio.TimeoutError:
+        log.warning("action=%s duration_ms=%d ok=false error_code=COMMAND_TIMEOUT",
+                    command, int((time.perf_counter() - started) * 1000))
+        result = {
+            "ok": False,
+            "error_code": "COMMAND_TIMEOUT",
+            "error": "COMMAND_TIMEOUT",
+            "message": (
+                "Команда '%s' не получила ответ демона за %.1f с "
+                "(жёсткий MCP-потолок). Состояние браузера после команды "
+                "неизвестно — НЕ повторяй mutate-действие вслепую." %
+                (command, hard_timeout)),
+            "hint": ("Проверь состояние через browser_get_context / "
+                     "browser_video(get_state) или browser_tabs; при "
+                     "подтверждённом отсутствии эффекта повтори один раз."),
+            "state_uncertain": True,
+            "retry_allowed": False,
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "budget_ms": int(hard_timeout * 1000),
+        }
 
     if isinstance(result, dict):
+        result = dict(result)
+        result.setdefault("duration_ms",
+                          int((time.perf_counter() - started) * 1000))
         # Этап 7 ТЗ: state_verifier — пост-проверка mutate-действий с verify=true.
         # Ожидания берутся из параметров; данные — из ответа адаптера. Если
         # данных для проверки нет — passed=True (нет false-negative).
@@ -649,6 +687,14 @@ async def call(command: str, params: Optional[dict] = None, *,
             result = {**result, "ok": False}
         if command in _CONTEXT_COMMANDS:
             CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+    # ТЗ §12.2 (этап 7): per-call лог в формате ключ-значение.
+    ok = bool(result.get("ok")) if isinstance(result, dict) else True
+    err_code = (result.get("error_code") or result.get("error") or "") \
+        if isinstance(result, dict) else ""
+    log.info(
+        "tool=%s action=%s duration_ms=%d ok=%s error_code=%s",
+        tool_name, command,
+        int((time.perf_counter() - started) * 1000), ok, err_code or "-")
     AUDIT.record(tool_name, check_args, decision=decision.to_dict(),
                  result=result if isinstance(result, dict) else {"ok": True},
                  context=CONTEXT_MANAGER.get_active_context().to_public_dict())
