@@ -22,7 +22,9 @@ if str(Path(__file__).resolve().parent) not in _sys.path:
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from modules.context_manager import ContextManager          # noqa: E402
-from modules.policy_guard import PolicyGuard                # noqa: E402
+from modules.policy_guard import (                          # noqa: E402
+    PolicyGuard, PolicyVerdict, RULE_SOURCES,
+)
 from modules.settings_loader import (                        # noqa: E402
     SettingsLoader, init_global_loader,
 )
@@ -530,6 +532,74 @@ async def call(command: str, params: Optional[dict] = None, *,
     SETTINGS_LOADER.reload_if_changed()
     tool_name = tool or _COMMAND_TO_TOOL.get(command, command)
     check_args = dict(guard_args if guard_args is not None else (params or {}))
+
+    # Policy Guard v2.0 (Sprint 3): Anti-Panic Lock. После INTENT_REDIRECT
+    # деструктивные инструменты (web_search / browser_navigate на главную /
+    # URL-выдача) временно заблокированы, чтобы агент не ушёл в паническую
+    # петлю и не УНИЧТОЖИЛ контекст страницы (Context Sanctity).
+    if CONTEXT_MANAGER.is_tool_blocked(tool_name):
+        log.info("Anti-Panic lock: %s blocked (PANIC_LOOP_DETECTED)",
+                 tool_name)
+        panic = {
+            "ok": False,
+            "allowed": False,
+            "verdict": "blocked",
+            "error_code": "PANIC_LOOP_DETECTED",
+            "rule_source": RULE_SOURCES.get("PANIC_LOOP_DETECTED", ""),
+            "attempted_tool": tool_name,
+            "attempted_args": check_args,
+            "message": (
+                "[SYSTEM POLICY OVERRIDE]: Ты пытаешься покинуть страницу "
+                "из-за ошибки. Остановись. Выполни "
+                "browser_find_interactive_element или "
+                "browser_ui_search_box для поиска на ТЕКУЩЕЙ странице. "
+                "ЗАПРЕЩЕНО использовать web_search, google-search или "
+                "browser_navigate на главную."),
+            "system_injection": (
+                "[SYSTEM POLICY OVERRIDE]: Ты пытаешься покинуть страницу "
+                "из-за ошибки. Остановись. Выполни "
+                "browser_find_interactive_element или browser_ui_search_box "
+                "для поиска на ТЕКУЩЕЙ странице. ЗАПРЕЩЕНО использовать "
+                "web_search, google-search или browser_navigate на главную."),
+            "__system_injection__": {
+                "priority": "critical",
+                "message": ("[SYSTEM POLICY OVERRIDE]: Ты пытаешься покинуть "
+                            "страницу из-за ошибки. Остановись. Выполни "
+                            "browser_find_interactive_element или "
+                            "browser_ui_search_box для поиска на ТЕКУЩЕЙ "
+                            "странице. ЗАПРЕЩЕНО использовать web_search, "
+                            "google-search или browser_navigate на главную."),
+                "required_action": "immediate_correction",
+            },
+            "suggested_safe_actions": [
+                {"tool": "browser_find_interactive_element",
+                 "args": {"pattern": str(check_args.get("query")
+                                         or check_args.get("pattern") or "")},
+                 "priority": "immediate", "auto_retry": True},
+                {"tool": "browser_ui_search_box",
+                 "args": {"query": str(check_args.get("query") or "")},
+                 "priority": "secondary"},
+            ],
+        }
+        AUDIT.record(tool_name, check_args, decision=panic, result=panic,
+                     context=CONTEXT_MANAGER.get_active_context().to_public_dict())
+        return panic
+
+    # Policy Guard v2.0 (Sprint 2): Intercept & Translate. Перехватываем
+    # деструктивные НАМЕРЕНИЯ до классических hard-rules и возвращаем
+    # system_injection с точным алгоритмом коррекции + ставим Anti-Panic Lock.
+    intent = POLICY_GUARD.evaluate_intent(
+        tool_name, check_args,
+        CONTEXT_MANAGER.get_active_context().to_public_dict())
+    if intent.verdict == PolicyVerdict.INTENT_REDIRECT:
+        log.info("PolicyGuard intent redirect: %s (%s)",
+                 tool_name, intent.error_code)
+        CONTEXT_MANAGER.set_panic_lock(duration_ms=10000)
+        result = {"ok": False, **intent.to_dict()}
+        AUDIT.record(tool_name, check_args, decision=intent.to_dict(),
+                     result=result,
+                     context=CONTEXT_MANAGER.get_active_context().to_public_dict())
+        return result
 
     decision = POLICY_GUARD.check(tool_name, check_args)
     if not decision.allowed:
@@ -1125,33 +1195,52 @@ async def browser_expand_menu(
 
 
 @mcp.tool()
-async def browser_search_on_page(
+async def browser_dom_text_search(
     pattern: str, regex: bool = False
 ) -> dict:
+    """Аналог Ctrl+F: поиск текстового совпадения в DOM ТЕКУЩЕЙ страницы.
+
+    ВНИМАНИЕ: НЕ ПЕРЕЗАГРУЖАЕТ страницу и НЕ УНИЧТОЖАЕТ контекст.
+    Возвращает кликабельные метаданные найденных элементов (href, selector,
+    index, actionable, score). Используй для поиска на уже загруженной
+    странице вместо любой URL-навигации (Context Sanctity).
+
+    Args:
+        pattern: искомый текст (или regex при regex=True).
+        regex: трактовать pattern как регулярное выражение.
+    """
     return await call("search_on_page", {
         "pattern": pattern, "regex": regex
     })
 
 
-@mcp.tool()
-async def browser_site_search(query: str, site: str = "",
-                              override_phrase: str = "") -> dict:
-    """Поиск на текущем сайте через его собственную форму поиска.
+#: Семантический алиас v2.0 (Sprint 1): прежнее имя сохранено для
+#: обратной совместимости со старыми промптами/адаптерами.
+browser_search_on_page = browser_dom_text_search
 
-    Селекторы — из config/player_selectors.json (секция сайта), для
-    YouTube есть URL-фолбэк /results?search_query=. Политика: навигация
-    на URL выдачи перехватывается виртуальным инструментом
-    browser_navigate_to_search_url и требует allow_site_search или
-    override_phrase (POLICY_SITE_SEARCH_NOT_REQUESTED).
+
+@mcp.tool()
+async def browser_navigate_to_search_results(query: str, site: str = "",
+                                             override_phrase: str = "") -> dict:
+    """ВНИМАНИЕ: выполняет ПЕРЕХОД ПО URL на страницу выдачи сайта.
+
+    ПЕРЕЗАГРУЖАЕТ текущую страницу и УНИЧТОЖАЕТ текущие результаты
+    (для YouTube — переход на /results?search_query=).
+
+    ЗАПРЕЩЕНО использовать, если пользователь просит найти что-то на
+    уже загруженной странице. Для поиска НА ТЕКУЩЕЙ странице используй
+    browser_dom_text_search или browser_find_interactive_element; для
+    поиска через форму сайта — browser_ui_search_box.
+
+    Политика: перехватывается PolicyGuard и требует allow_site_search или
+    дословной фразы пользователя override_phrase
+    (POLICY_SITE_SEARCH_NOT_REQUESTED / INTENT_REDIRECT_*).
 
     Args:
         query: поисковый запрос.
         site: ключ сайта из конфига (по умолчанию — определён по URL).
         override_phrase: дословная фраза пользователя, разрешающая поиск
             на сайте (например «ищи на сайте», «найди на ютубе …»).
-            Обязательна, если политика сайта запрещает переход на
-            страницу выдачи; без неё вызов вернёт
-            POLICY_SITE_SEARCH_NOT_REQUESTED.
     """
     params = {"query": query, "override_phrase": override_phrase}
     if site:
@@ -1159,14 +1248,41 @@ async def browser_site_search(query: str, site: str = "",
     return await call("site_search", params)
 
 
-@mcp.tool()
-async def browser_find_link(pattern: str = "") -> dict:
-    """Найти кликабельные элементы страницы по тексту/href с ранжированием.
+#: Семантический алиас v2.0 (Sprint 1): прежнее имя сохранено для
+#: обратной совместимости (тесты и старые промпты используют его).
+browser_site_search = browser_navigate_to_search_results
 
-    Возвращает candidates (candidate_id/text/href/video_id/score). Если
-    лучший score < relevance_threshold — ответ содержит error_code
+
+@mcp.tool()
+async def browser_ui_search_box(query: str, site: str = "") -> dict:
+    """Поиск через UI-строку сайта: находит input[type='search'], кликает,
+    вводит запрос и нажимает Enter.
+
+    Рекомендуемый безопасный способ поиска на открытой странице
+    (Recovery Injection после INTENT_REDIRECT). НЕ выполняет ручной
+    переход на URL выдачи до отправки формы сайтом.
+
+    Args:
+        query: поисковый запрос.
+        site: необязательный ключ сайта из config/player_selectors.json.
+    """
+    params: dict = {"query": query}
+    if site:
+        params["site"] = site
+    return await call("ui_search_box", params)
+
+
+@mcp.tool()
+async def browser_find_interactive_element(pattern: str = "") -> dict:
+    """Основной инструмент поиска кликабельных элементов ТЕКУЩЕЙ страницы.
+
+    Находит кнопки, ссылки, видео-тайлы по нечёткому совпадению текста/href
+    с ранжированием. Возвращает candidates (candidate_id/text/href/video_id/
+    score). НЕ ПЕРЕЗАГРУЖАЕТ страницу.
+
+    Если лучший score < relevance_threshold — ответ содержит error_code
     NO_CONFIDENT_MATCH_ON_CURRENT_PAGE: не кликай вслепую, раскрой меню
-    или уточни запрос.
+    (browser_expand_menu) или уточни запрос.
     """
     result = await call("find_link", {"pattern": pattern})
     items = result.get("links") if isinstance(result, dict) else None
@@ -1181,6 +1297,11 @@ async def browser_find_link(pattern: str = "") -> dict:
         pattern, items, source=str(result.get("source") or "live_dom"))
     ranked["url"] = result.get("url", "")
     return ranked
+
+
+#: Семантический алиас v2.0 (Sprint 1): прежнее имя сохранено для
+#: обратной совместимости (suggested_safe_actions используют его).
+browser_find_link = browser_find_interactive_element
 
 
 @mcp.tool()

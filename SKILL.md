@@ -337,6 +337,57 @@ description: Практичный порядок работы агента с Fi
 3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО повторять заблокированное действие или «сдаваться», если guard предложил альтернативу (например `browser_find_link` или `browser_search_on_page`). Повтор того же вызова после отказа — нарушение этого правила, а не «терпение».
 4. Если все `suggested_safe_actions` исчерпаны и ни одно не привело к результату — только тогда сообщи пользователю о проблеме, кратко указав `error_code` и предпринятые шаги.
 
+### Протокол восстановления после Intent Redirect
+
+Policy Guard v2.0 («Intercept & Translate»): отказ вида `INTENT_REDIRECT_*` — это не ошибка системы, а перехват деструктивного намерения с готовым алгоритмом коррекции. Если инструмент вернул `INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE`, `INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL` или другой `INTENT_REDIRECT`/`POLICY_DENY` с полем `system_injection`:
+
+1. **Немедленно остановись.** Не пытайся «починить» ситуацию перезагрузкой страницы (`browser_navigate` на главную) или уходом во внешний поиск (`web_search`, `google-search`) — это деструктивные действия, которые УНИЧТОЖАТ контекст и приведут к панической петле.
+2. **Прочитай `system_injection`.** Поле содержит точный пошаговый алгоритм выполнения задачи безопасно через DOM/UI текущей страницы. MCP-хосты обязаны передавать его LLM как System Message с максимальным приоритетом (поле `__system_injection__`, `priority: "critical"`).
+3. **Выполни альтернативу немедленно.** Первый элемент `suggested_safe_actions` (`priority="immediate"`, `auto_retry=true`) — обычно `browser_ui_search_box(query=...)` для поиска через строку сайта, затем `browser_find_link(pattern=...)` / `browser_dom_text_search(pattern=...)` для работы с результатами на загруженной странице.
+4. **Anti-Panic Lock.** После `INTENT_REDIRECT` система временно (~10 секунд) блокирует деструктивные инструменты (`web_search`, `google-search`, `duckduckgo-search`, `browser_site_search`, `browser_navigate`). Повторная попытка уйти со страницы вернёт `PANIC_LOOP_DETECTED` — это сигнал остановиться и выполнить `browser_find_interactive_element` / `browser_ui_search_box` на ТЕКУЩЕЙ странице.
+
+### Anti-Panic Lock
+
+`PANIC_LOOP_DETECTED` означает, что после `INTENT_REDIRECT` ты снова попытался вызвать заблокированный деструктивный инструмент (`web_search`, `google-search`, `duckduckgo-search`, `browser_site_search`, `browser_navigate`) в панической петле. Действия:
+
+1. Остановись и НЕ повторяй заблокированный вызов — лок снимется сам через ~10 секунд.
+2. Выполни `browser_find_interactive_element(pattern=<запрос>)` или `browser_dom_text_search(pattern=<запрос>)` на ТЕКУЩЕЙ странице.
+3. Если задача требует поиска на сайте — дождись снятия лока и выполни `browser_ui_search_box(query=<запрос>)`.
+4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО уходить во внешний поиск или на главную страницу — это уничтожает контекст (см. §Неприкосновенность контекста (Context Sanctity)).
+
+### Неприкосновенность контекста (Context Sanctity)
+
+1. Если страница уже загружена и пользователь просит «найди на странице» — любая URL-навигация (`browser_navigate`, `browser_new_tab`, переход на `/results?search_query=`) считается **УНИЧТОЖЕНИЕМ ДАННЫХ**: она ПЕРЕЗАГРУЖАЕТ страницу и УНИЧТОЖАЕТ текущие результаты, DOM-позицию и скролл. Используй только DOM/UI-инструменты: `browser_dom_text_search`, `browser_find_interactive_element`, `browser_ui_search_box`.
+2. Переход на корень (главную страницу) текущего сайта при активном `watch`/`search`-контексте запрещён и перехватывается кодом `INTENT_REDIRECT_ROOT_NAVIGATION`.
+3. Возврат к результатам поиска — только через историю (`browser_history_back`), никогда через повторную навигацию по URL выдачи.
+4. Контекст священен до тех пор, пока пользователь ЯВНО не попросит уйти со страницы.
+
+### Примеры правильного поведения (few-shot)
+
+**Пример 1. Пользователь на YouTube (главная), просит «найди на странице джем стас пьеха».**
+
+НЕПРАВИЛЬНО (деструктивная петля):
+1. `browser_site_search("Джем Стас Пьеха")` → `POLICY_SITE_SEARCH_NOT_REQUESTED` / `INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE`;
+2. `browser_navigate("https://www.youtube.com/results?search_query=...")` → `INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL`;
+3. `web_search("Джем Стас Пьеха")` → уход во внешний поиск, `PANIC_LOOP_DETECTED`.
+
+ПРАВИЛЬНО (Recovery Protocol):
+1. получить `INTENT_REDIRECT` и прочитать `system_injection`;
+2. `browser_ui_search_box(query="Джем Стас Пьеха")` — ввод запроса в поисковую строку YouTube;
+3. дождаться загрузки результатов;
+4. `browser_find_link(pattern="Джем Стас Пьеха")` — поиск нужного видео в выдаче;
+5. `browser_click_selector(selector=<href кандидата>)` — открытие видео.
+
+**Пример 2. Пользователь на странице результатов поиска YouTube, просит «открой видео».**
+
+НЕПРАВИЛЬНО:
+1. `browser_navigate("https://www.youtube.com")` — возврат на главную, уничтожение результатов (`INTENT_REDIRECT_ROOT_NAVIGATION`);
+2. повторный `browser_site_search(...)` — лишняя перезагрузка выдачи.
+
+ПРАВИЛЬНО:
+1. `browser_find_link(pattern="Джем Стас Пьеха")` — поиск видео в ТЕКУЩИХ результатах;
+2. клик по лучшему кандидату (`score >= relevance_threshold`).
+
 ### Ограничения видеоплееров
 
 - Успех управления HTML5-элементом не означает, что сайтский интерфейс плеера обновился ожидаемым образом.
