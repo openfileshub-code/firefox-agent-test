@@ -90,3 +90,36 @@
 2026-10-17 16:13:41,053 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
 2026-10-17 16:13:41,055 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
 2026-10-17 16:13:46,611 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 16:16:28,341 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:16:28,343 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:16:52,567 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:16:52,568 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:16:53,126 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:16:53,127 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:16:53,387 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:16:53,387 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:16:53,390 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:03,771 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:17:03,773 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:17:05,503 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:17:05,505 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:06,090 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:17:06,091 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:17:06,358 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:06,358 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:06,360 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:18,669 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:43,129 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:17:43,130 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:43,689 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:17:43,690 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:17:43,950 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:43,951 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:43,953 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:57,959 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:17:57,960 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:17:58,513 INFO PolicyGuard intent redirect: browser_new_tab (INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL)
+2026-10-17 16:17:58,514 INFO Anti-Panic lock: browser_navigate blocked (PANIC_LOOP_DETECTED)
+2026-10-17 16:17:58,774 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:58,775 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:17:58,777 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-

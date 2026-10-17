@@ -701,8 +701,9 @@ class PolicyGuard:
                         "НЕМЕДЛЕННО вызови browser_navigate(url='%s', "
                         "new_tab=False) — первое действие из "
                         "suggested_safe_actions (priority='immediate'). "
-                        "ЗАПРЕЩЕНО повторять browser_new_tab и ЗАПРЕЩЕНО "
-                        "переспрашивать пользователя." % url_arg,
+                        "ЗАПРЕЩЕНО повторять этот заблокированный вызов "
+                        "(browser_new_tab) и ЗАПРЕЩЕНО переспрашивать "
+                        "пользователя." % url_arg,
                 suggestions=([] if nav_suggestion is None else [nav_suggestion])
                             + [{"tool": "browser_find_link",
                                 "args": {"pattern": ""}}],
@@ -747,9 +748,9 @@ class PolicyGuard:
                     "НЕМЕДЛЕННО вызови browser_navigate(url='%s', "
                     "new_tab=False) — первое действие из "
                     "suggested_safe_actions (priority='immediate'). "
-                    "ЗАПРЕЩЕНО повторять browser_new_tab и ЗАПРЕЩЕНО "
-                    "переспрашивать пользователя «в новой вкладке или "
-                    "текущей?»." % url_arg,
+                    "ЗАПРЕЩЕНО повторять этот заблокированный вызов "
+                    "(browser_new_tab) и ЗАПРЕЩЕНО переспрашивать "
+                    "пользователя «в новой вкладке или текущей?»." % url_arg,
             suggestions=suggestions,
             confirmation=False)
 
