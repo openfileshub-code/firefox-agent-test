@@ -233,15 +233,16 @@ py -3 -m venv "$Project\.venv"
 | `browser_scroll(direction, amount)` | Прокрутка страницы. |
 | `browser_get_content(max_chars=8000, mode="text")` | Получение текста или HTML страницы. |
 | `browser_screenshot(full_page=False)` | Снимок страницы. |
-| `browser_search_on_page(pattern, regex=False)` | Поиск текста на текущей странице. |
-| `browser_find_link(pattern="")` | Нечёткий поиск ссылок и интерактивных элементов. |
+| `browser_search_on_page(pattern, regex=False)` | Поиск текста на текущей странице. Возвращает кликабельные метаданные: `href`, `selector`, `index`, `actionable`, `score`. |
+| `browser_find_link(pattern="")` | Нечёткий поиск ссылок и интерактивных элементов. Возвращает `href`, `type`, `role`, `disabled`, `selector`, `index`, `actionable`, `score`. |
+| `browser_site_search(query, site="")` | Поиск на текущем сайте через его собственную форму (YouTube — URL-фолбэк `/results?search_query=`). Без явного запроса пользователя блокируется политикой `POLICY_SITE_SEARCH_NOT_REQUESTED`. |
 | `browser_eval(js)` | Выполнение произвольного JavaScript (заблокирован для управления видео). |
 
 ### Видео и медиа
 
 | Инструмент | Описание |
 | :--- | :--- |
-| `browser_video(action, value=None)` | Управление видеоплеером через систему адаптеров (YouTube, Twitch, VK Video, Rutube, generic HTML5). Поддерживает: play, pause, volume, seek, state, set_quality, toggle_theater_mode, next_video, toggle_chat_visibility, fullscreen_enter, detect_login. |
+| `browser_video(action, value=None)` | Управление видеоплеером через систему адаптеров (YouTube, Twitch, VK Video, Rutube, generic HTML5). Поддерживает: play, pause, volume, seek, state, set_quality, toggle_theater_mode, set_theater_mode, next_video, toggle_chat_visibility, fullscreen_enter, detect_login. Идемпотентный `set_theater_mode` не выполняет переключающее действие при низкой уверенности детектора (`STATE_UNCERTAIN`) и не повторяет переключение после `dispatched`. |
 | `browser_expand_menu(trigger_text, mode="hover", wait_ms=1500, zone_selector="")` | Раскрытие скрытых меню/дропдаунов с последующим сканированием новых элементов (включая Shadow DOM). |
 
 ### Расширенные инструменты (доступны при регистрации в MCP-хосте)
@@ -276,6 +277,25 @@ Copy-Item "$Project\config\user_tool_settings.example.json" "$Project\config\use
 
 ---
 
+## 🧱 Структурированные ошибки и бюджеты времени (ТЗ v2.0)
+
+Все команды видео-адаптера и MCP-инструменты возвращают **структурированный JSON** вместо «сырых» исключений: при неуспехе в ответе присутствуют `ok:false`, стабильный `error_code` и диагностика (`diagnostics`, `duration_ms`, `budget_ms`, `state_uncertain`, `retry_allowed`). Полный реестр кодов — `ERROR_CODES` в `adapters/base.py`; ключевые:
+
+| error_code | Смысл |
+| :--- | :--- |
+| `COMMAND_TIMEOUT` | Превышен жёсткий бюджет вызова (MCP-потолок 5000 мс, видеокоманда 2500 мс). |
+| `DISPATCH_UNCONFIRMED` | Действие отправлено в плеер, но подтверждение не получено до конца бюджета. |
+| `STATE_UNCERTAIN` | Детектор состояния уверен ниже порога 0.8 — переключающее действие не выполняется. |
+| `STATE_VERIFICATION_UNCERTAIN` | После `dispatched=true` повторное переключающее действие запрещено. |
+| `USER_INPUT_CONFLICT` | Пользователь взаимодействует со страницей/плеером (вмешательство ≤ 600 мс), агентское действие отменено. |
+| `ALREADY_IN_STATE` | Идемпотентный no-op: целевое состояние уже достигнуто. |
+| `POLICY_SITE_SEARCH_NOT_REQUESTED` | Site-search без явного запроса пользователя заблокирован политикой. |
+| `POLICY_LOOP_DETECTED` | Повторяющиеся policy-deny по одному действию — цикл пресечён. |
+
+Бюджеты времени централизованы в `config/behavior.json` (загрузчик — `modules/timing_config.py`): целевая таблица таймаутов ТЗ §7.2 (800/1500/2500/5000 мс, тишина пользовательского ввода 250–300 мс, poll 20 мс, короткие бюджеты каналов переключения 150–300 мс). Win32-вызовы оконного watchdog выполняются через `run_in_executor` и не блокируют asyncio-цикл демона; демон шлёт heartbeat с причинами деградации.
+
+---
+
 ## 🩺 Диагностика и Логи
 
 Если что-то пошло не так, **не убивайте процессы принудительно** через Диспетчер задач! Это может повредить профиль браузера и оставить lock-файлы. Код не удаляет их автоматически в целях безопасности (иначе можно нарушить работу живой сессии).
@@ -285,11 +305,11 @@ Copy-Item "$Project\config\user_tool_settings.example.json" "$Project\config\use
 - `logs/mcp_debug.log` — лог взаимодействия MCP-сервера и хоста (ротация до 5 МБ, 3 копии).
 - `logs/daemon_control.log` — лог работы VBS/BAT скриптов.
 - `logs/tool_audit.jsonl` — аудит каждого tool call (решения PolicyGuard).
-- `playwright_profile/.browserd_state.json` — текущий статус демона (PID, TCP-порт, токен, версия протокола v4).
+- `playwright_profile/.browserd_state.json` — текущий статус демона (PID, TCP-порт, токен, версия протокола v5).
 
 **Частые проблемы:**
 - **MCP-хост пишет "Демон не найден":** Проверьте, запущен ли `pythonw.exe` / `browserd.py` в Диспетчере задач. Убедитесь, что `server.py` и `browserd.py` смотрят на одну и ту же папку `playwright_profile`. Проверьте, что порт в state-файле ещё доступен.
-- **Ошибка версии протокола:** Демон и MCP-сервер используют `PROTOCOL_VERSION = 4`. Если версии не совпадают, остановите старый демон и запустите новую версию.
+- **Ошибка версии протокола:** Демон использует `PROTOCOL_VERSION = 5`, MCP-сервер поддерживает версии 4–5 (`SUPPORTED_PROTOCOL_VERSIONS = (4, 5)`). Если демон старой версии несовместим с сервером, остановите старый демон и запустите новую версию.
 - **Браузер закрывается при закрытии хоста:** Значит, вы запустили `browserd.py` из того же терминала, что и MCP-хост, или Планировщик заданий не настроен. Демон должен быть независимым процессом.
 - **VBS выдает кракозябры:** Сохраните `.vbs` в кодировке "Юникод" (UTF-16 LE с BOM).
 - **Ошибка "Профиль уже используется":** Демон не завершился штатно. Проверьте `logs/browserd.log`, найдите процесс в Диспетчере задач и завершите его, затем удалите `parent.lock` в папке `playwright_profile`.
@@ -385,12 +405,15 @@ Use the included `start_browser.vbs` and `stop_browser.vbs` to run the daemon si
 - **Settings:** Uncheck "Stop the task if it runs longer than...".
 
 ### 🛠️ Available MCP Tools
-Core tools: `browser_start`, `browser_stop`, `browser_navigate`, `browser_go_back`, `browser_go_forward`, `browser_tabs`, `browser_new_tab`, `browser_close_tab`, `browser_switch_tab`, `browser_click_text`, `browser_click_selector`, `browser_press_key`, `browser_type_text`, `browser_scroll`, `browser_get_content`, `browser_screenshot`, `browser_search_on_page`, `browser_find_link`, `browser_eval`, `browser_video`, `browser_expand_menu`.
+Core tools: `browser_start`, `browser_stop`, `browser_navigate`, `browser_go_back`, `browser_go_forward`, `browser_tabs`, `browser_new_tab`, `browser_close_tab`, `browser_switch_tab`, `browser_click_text`, `browser_click_selector`, `browser_press_key`, `browser_type_text`, `browser_scroll`, `browser_get_content`, `browser_screenshot`, `browser_search_on_page`, `browser_find_link`, `browser_site_search`, `browser_eval`, `browser_video`, `browser_expand_menu`.
 
 Extended tools (if registered): `browser_inspect_page`, `browser_search_text`, `browser_scroll_to_text`, `browser_form_inspect`, `browser_form_fill`, `browser_websocket_events`, `browser_network_errors`, `browser_dialog_state`, `browser_dialog_resolve`.
 
+### 🧱 Structured errors and time budgets (spec v2.0)
+Failed actions return structured JSON (`ok:false` + stable `error_code` + diagnostics such as `duration_ms`, `budget_ms`, `state_uncertain`, `retry_allowed`) instead of raw exceptions. Key codes: `COMMAND_TIMEOUT` (hard budget exceeded — MCP ceiling 5000 ms, video command 2500 ms), `DISPATCH_UNCONFIRMED`, `STATE_UNCERTAIN` (detector confidence < 0.8, no toggling action performed), `STATE_VERIFICATION_UNCERTAIN` (no second toggling channel after `dispatched=true`), `USER_INPUT_CONFLICT` (user interaction detected within ≤ 600 ms), `ALREADY_IN_STATE` (idempotent no-op), `POLICY_SITE_SEARCH_NOT_REQUESTED`, `POLICY_LOOP_DETECTED`. All timing budgets live in `config/behavior.json` (loader: `modules/timing_config.py`). Win32 window calls run via `run_in_executor` so the daemon's asyncio loop is never blocked; the daemon emits heartbeats with degradation reasons.
+
 ### 🩺 Troubleshooting
 - **Do not force kill processes** via Task Manager. Use the `browser_stop` MCP tool or `stop_browser.vbs` to gracefully save the session.
-- **Protocol version:** Both daemon and server use `PROTOCOL_VERSION = 4`. Mismatched versions will throw an error.
+- **Protocol version:** The daemon uses `PROTOCOL_VERSION = 5`; the MCP server supports versions 4–5 (`SUPPORTED_PROTOCOL_VERSIONS = (4, 5)`). A too-old or incompatible daemon must be restarted with the new version.
 - **Logs:** All logs live in the `logs/` folder: check `logs/browserd.log` for Playwright errors, `logs/mcp_debug.log` for host communication issues, and `.browserd_state.json` for TCP port/PID status.
 - **Profile Locks:** If the daemon crashes, the OS will release the lock. Do not manually delete lock files unless you are sure the process is dead.

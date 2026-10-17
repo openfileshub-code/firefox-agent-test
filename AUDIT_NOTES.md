@@ -37,3 +37,24 @@
 Все критические утверждения, кроме уже устранённых C9/C10, подтверждены. Правки вводятся
 в порядке дорожной карты ТЗ §25: структурированные ошибки → детектор → идемпотентный
 theater_set → fast-CSS → учёт ввода → таймауты/watchdog → PolicyGuard/поиск → SKILL/тесты/гигиена.
+
+---
+
+## Финальный статус (после завершения дорожной карты ТЗ §25, 2026-10-17)
+
+| № | Утверждение | Статус исправления | Где |
+|---|---|---|---|
+| C1 | Toggle без confidence-порога, повторный канал после dispatched | **исправлено** (этапы 2–3) | `adapters/youtube_adapter.py`: идемпотентный `set_theater_mode` — пред-проверка S0, `ALREADY_IN_STATE`, `STATE_UNCERTAIN` при confidence < 0.8, запрет второго переключающего канала после `dispatched=true` (`STATE_VERIFICATION_UNCERTAIN`) |
+| C2 | Детектор не читает `ytd-watch-flexy[theater]` | **исправлено** (этап 2) | Многоканальный JS-детектор: атрибут `theater`, класс `.theater-mode`, `[wide]`, aria кнопки, геометрия-fallback; противоречивые снапшоты → уровень `uncertain`; регресс-тест на снапшот `ratio_wide + theater_mode:false` |
+| C3 | ytp-hide-controls / видимость кнопки | **исправлено** (этап 4) | Инъекция fast-CSS `agent-fast-mode` (принуждение видимости контролов), отказ от hover-зависимости |
+| C4 | Синхронные Win32 в asyncio watchdog | **исправлено** (этап 6) | `browserd.py`: `apply_geometry` через `run_in_executor`, heartbeat с причинами деградации |
+| C5 | search_on_page без href/selector/index | **исправлено** (этап 8) | `cmd_search_on_page` возвращает метаданные `href/selector/index/actionable/score` |
+| C6 | find_link без selector/index/actionable/score | **исправлено** (этап 8) | `cmd_find_link` дополнен метаданными и ранжировщиком `score` |
+| C7 | inplace-навигация блокировалась search-policy | **исправлено** (этап 8) | `modules/policy_guard.py`: `_allow_inplace_navigation` проверяется раньше поисковой политики; добавлен `POLICY_LOOP_DETECTED` с бюджетом deny |
+| C8 | README v4 vs код v5 | **исправлено** (этап 10) | README RU/EN: `PROTOCOL_VERSION = 5`, сервер поддерживает (4, 5); добавлены разделы про structured errors/timeouts и `browser_site_search` |
+| C9 | Логи/.gitignore | **не требовало действий** | Подтверждено на этапе 0 |
+| C10 | Discovery инструментов | **исправлено ранее** | Закреплено правилами SKILL.md (этап 9) |
+
+Корневые причины R1–R7: все подтверждённые устранены (R1→C2, R2→C1, R3→таймауты behavior.json+hard budgets, R4→fast-CSS, R5→C4, R6→C5/C6/C7+browser_site_search, R7→C8/SKILL).
+
+Итоговая верификация: pytest — все тесты зелёные (включая новые test_youtube_theater*, test_server_timeout, test_policy_guard*), git-история содержит коммиты этапов 0–10.
