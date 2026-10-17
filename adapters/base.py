@@ -163,6 +163,24 @@ class BaseVideoAdapter:
         self.video_controller = video_controller
         cfg = load_selector_config()
         self.selectors: dict[str, Any] = cfg.get(self.platform, {})
+        self._user_input_monitor: Any = None
+
+    async def _check_user_input(self, action: str) -> dict[str, Any] | None:
+        """ТЗ §8: пауза пользовательского ввода перед переключающим действием.
+
+        Лениво ставит init-ловушку слушателей ввода; при активности
+        пользователя в пределах quiescence-бюджета возвращает
+        структурированную ошибку USER_INPUT_CONFLICT (иначе None).
+        """
+        try:
+            from modules.user_input_monitor import UserInputMonitor
+            if self._user_input_monitor is None:
+                self._user_input_monitor = UserInputMonitor(self.page)
+                await self._user_input_monitor.install()
+            return await self._user_input_monitor.ensure_quiescence(action)
+        except Exception as exc:  # noqa: BLE001 — monitor fail-open
+            logger.info("user_input: монитор недоступен (%s), пропускаю", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Хелперы поиска (семантика вместо селекторов)

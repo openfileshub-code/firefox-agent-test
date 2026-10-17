@@ -14,7 +14,14 @@ import asyncio
 import logging
 from typing import Any
 
-from adapters.base import BaseVideoAdapter, ElementNotFoundError
+from adapters.base import (
+    CONFIDENCE_TRUSTED,
+    BaseVideoAdapter,
+    ElementNotFoundError,
+    state_is_uncertain,
+    structured_error,
+)
+from modules import timing_config
 
 logger = logging.getLogger("FirefoxMCP_Adapters.YouTube")
 
@@ -504,8 +511,26 @@ class YoutubeAdapter(BaseVideoAdapter):
               const out = { theater: false, full_window: false,
                             small_player: false, cinematics: false,
                             container_class: '',
+                            flexy_theater_attr: null, flexy_wide_attr: null,
+                            player_theater_class: null,
                             aria_theater_on: null, aria_theater_off: null,
                             ratio: null };
+              // Авторитетный канал (ТЗ §11.2, C2): атрибуты ytd-watch-flexy.
+              try {
+                const flexy = document.querySelector('ytd-watch-flexy');
+                if (flexy) {
+                  out.flexy_theater_attr = flexy.hasAttribute('theater');
+                  out.flexy_wide_attr = flexy.hasAttribute('wide');
+                }
+              } catch (e) {}
+              // Авторитетный канал: класс .theater-mode у самого плеера.
+              try {
+                const mpCls = document.querySelector('#movie_player');
+                if (mpCls) {
+                  out.player_theater_class =
+                    /(^|\s)theater-mode(\s|$)/i.test(String(mpCls.className || ''));
+                }
+              } catch (e) {}
               const sels = ['#movie_player', '#ytd-player',
                             'ytd-watch-flexy', '.html5-video-container'];
               for (const sel of sels) {
@@ -554,10 +579,26 @@ class YoutubeAdapter(BaseVideoAdapter):
         modes["cinematics"] = bool(info.get("cinematics"))
         modes["container_class"] = str(info.get("container_class", ""))[:300]
 
-        # --- layout_state: мультиканальная детекция (RC10) ---
+        # --- layout_state: мультиканальная детекция (RC10, ТЗ §11) -----
+        # Авторитетные каналы (C2): атрибут ytd-watch-flexy[theater],
+        # класс .theater-mode плеера. Противоречие авторитетных каналов
+        # с геометрией -> mode:"uncertain" вместо ложного theater_mode:false.
         evidence: list[str] = []
         score = 0.0
-        if info.get("theater"):
+        flexy_theater = info.get("flexy_theater_attr")   # True/False/None
+        player_theater_cls = info.get("player_theater_class")
+        css_on = bool(info.get("theater"))
+        if flexy_theater is True:
+            score += 0.50
+            evidence.append("flexy_theater_attr:true")
+        elif flexy_theater is False:
+            evidence.append("flexy_theater_attr:false")
+        if player_theater_cls is True:
+            score += 0.45
+            evidence.append("player_theater_class")
+        elif player_theater_cls is False:
+            evidence.append("player_theater_class:false")
+        if css_on:
             score += 0.45
             evidence.append("css_theater_class")
         aria_on = info.get("aria_theater_on")
@@ -568,8 +609,9 @@ class YoutubeAdapter(BaseVideoAdapter):
         elif aria_off is True and aria_on is not True:
             evidence.append("aria_enter_theater")  # сигнал «не theater»
         ratio = info.get("ratio")
+        wide_geom = isinstance(ratio, (int, float)) and ratio >= 0.92
         if isinstance(ratio, (int, float)):
-            if ratio >= 0.92:
+            if wide_geom:
                 score += 0.15
                 evidence.append("ratio_wide:%.2f" % ratio)
             else:
@@ -577,19 +619,46 @@ class YoutubeAdapter(BaseVideoAdapter):
         if not modes.get("fullscreen"):
             score += 0.05
             evidence.append("not_fullscreen")
+
+        any_theater_positive = (flexy_theater is True
+                                or player_theater_cls is True or css_on)
+        # Противоречие (ТЗ R1 / §11.4): геометрия широкая, но все
+        # дискретные каналы говорят «не theater» — состояние недостоверно.
+        contradicted = (wide_geom and not any_theater_positive
+                        and aria_on is not True)
         confidence = round(min(1.0, max(0.0, score)), 2)
-        # Решение: theater, если основной CSS-сигнал ИЛИ два независимых
-        # дополнительных сигнала (aria+ratio) подтверждают широкий режим.
-        theater_detected = bool(info.get("theater")) or (
-            aria_on is True and isinstance(ratio, (int, float)) and ratio >= 0.92)
+        # Решение: theater, если любой авторитетный/CSS-канал ИЛИ
+        # независимая пара aria+geometry подтверждают широкий режим.
+        theater_detected = any_theater_positive or (
+            aria_on is True and wide_geom)
         if theater_detected and confidence < 0.45:
             confidence = 0.45
+        # Авторитетные каналы (flexy[theater]/.theater-mode/CSS-класс) —
+        # достаточное основание; при их подтверждении и согласованной
+        # геометрии состояние достоверно (ТЗ §11.3: >= CONFIDENCE_TRUSTED).
+        if (any_theater_positive and not contradicted
+                and (wide_geom or flexy_theater is True
+                     or player_theater_cls is True)):
+            confidence = max(confidence, 0.85)
+        if contradicted:
+            mode = "uncertain"
+            # При противоречии уверенность не должна позволять слепое
+            # переключение (порог CONFIDENCE_TRUSTED не достигается).
+            confidence = min(confidence, 0.6)
+        elif mode_is_default := (
+                flexy_theater is False and not css_on
+                and player_theater_cls is not True):
+            mode = "default"
+        else:
+            mode = ("theater" if theater_detected else
+                    ("default" if (modes.get("small_player_mode") or
+                                   aria_off is True or
+                                   confidence >= 0.45) else "unknown"))
         modes["theater_mode"] = theater_detected
         modes["layout_state"] = {
-            "mode": ("theater" if theater_detected else
-                     ("default" if info.get("small_player") or
-                      aria_off is True or confidence >= 0.45 else "unknown")),
+            "mode": mode,
             "theater_mode": theater_detected,
+            "uncertain": contradicted,
             "fullscreen": modes.get("fullscreen"),
             "confidence": confidence,
             "evidence": evidence,
@@ -729,11 +798,19 @@ class YoutubeAdapter(BaseVideoAdapter):
         }
 
     async def set_theater_mode(self, enabled: Any) -> dict[str, Any]:
-        """Идемпотентная установка theater-режима (RC7).
+        """Идемпотентная установка theater-режима (RC7, ТЗ §10.3–10.6).
 
-        Повторный запрос того же режима — no-op (``changed:false``);
-        переключение выполняется только при реальном расхождении
-        целевого и текущего состояний.
+        Гарантии по ТЗ:
+        * S0-предпроверка: если целевой режим уже активен и состояние
+          достоверно — no-op ``already_in_state`` без переключающего
+          действия;
+        * при confidence < CONFIDENCE_TRUSTED (0.8) или mode='uncertain'
+          переключающее действие НЕ выполняется — структурированный
+          ``STATE_UNCERTAIN`` (запрет слепого toggle);
+        * после того как канал «dispatched» (действие отправлено), но
+          состояние не подтверждено в бюджет — повторный переключающий
+          канал ЗАПРЕЩЁН (ТЗ §10.6): возврат ``dispatched:true`` +
+          ``STATE_VERIFICATION_UNCERTAIN``, чтобы не переключить дважды.
         """
         if isinstance(enabled, str):
             low = enabled.strip().lower()
@@ -744,20 +821,45 @@ class YoutubeAdapter(BaseVideoAdapter):
             enabled = bool(enabled)
 
         before = await self.get_player_modes()
-        current = bool(before.get("theater_mode"))
         lay_before = before.get("layout_state") or {}
-        if current == enabled:
-            return {
-                "ok": True,
-                "action": "theater_set",
-                "changed": False,
-                "theater_mode": current,
-                "layout": lay_before,
-                "message": "Режим уже '%s' — действие не выполнено (no-op)." % (
-                    "theater" if enabled else "default"),
-            }
+        current = bool(before.get("theater_mode"))
+        conf_before = float(lay_before.get("confidence") or 0.0)
 
-        toggled = await self.toggle_theater_mode()
+        # --- S0: достоверное предсостояние -> идемпотентный no-op ------
+        if not state_is_uncertain(lay_before) and conf_before >= CONFIDENCE_TRUSTED:
+            if current == enabled:
+                return {
+                    "ok": True,
+                    "action": "theater_set",
+                    "changed": False,
+                    "status": "already_in_state",
+                    "theater_mode": current,
+                    "layout": lay_before,
+                    "message": "Режим уже '%s' — действие не выполнено (no-op)." % (
+                        "theater" if enabled else "default"),
+                }
+        else:
+            # ТЗ §10.3: низкая уверенность/противоречие — запрещаем
+            # переключающее действие, просим разрешить состояние.
+            return structured_error(
+                "STATE_UNCERTAIN",
+                "Состояние layout недостоверно (confidence=%s%s) — "
+                "переключающее действие запрещено. Выполните layout_state "
+                "после стабилизации страницы или включите fast-CSS." % (
+                    lay_before.get("confidence"),
+                    ", mode=uncertain" if lay_before.get("uncertain") else ""),
+                action="theater_set",
+                diagnostics={"layout": lay_before,
+                             "required_confidence": CONFIDENCE_TRUSTED},
+            )
+
+        # ТЗ §8: перед переключающим действием — пауза пользовательского
+        # ввода (USER_INPUT_CONFLICT возвращается в бюджете <= 600 мс).
+        conflict = await self._check_user_input("theater_set")
+        if conflict is not None:
+            return conflict
+
+        toggled = await self.toggle_theater_mode(target=enabled)
         after = await self.get_player_modes()
         now = bool(after.get("theater_mode"))
         result = {
@@ -770,6 +872,20 @@ class YoutubeAdapter(BaseVideoAdapter):
             "tried_channels": (toggled.get("tried_channels")
                                if isinstance(toggled, dict) else []),
         }
+        # ТЗ §10.6: канал был dispatch'нут, но результат не подтверждён —
+        # это НЕУДАЧА верификации, а не повод пробовать следующий toggle.
+        if toggled.get("dispatched") and now != enabled:
+            result["ok"] = False
+            result["dispatched"] = True
+            result["error"] = "STATE_VERIFICATION_UNCERTAIN"
+            result["message"] = (
+                "Канал '%s' выполнил действие (dispatched), но theater_mode "
+                "не подтвердился в бюджете %d мс. Повторное переключение "
+                "запрещено (ТЗ §10.6) — проверьте layout_state." % (
+                    result.get("method"),
+                    int(timing_config.get("timing.video_action_verification_deadline_ms",
+                                          1500))))
+            return result
         if now != enabled:
             result["ok"] = False
             result["error"] = "THEATER_SET_FAILED"
@@ -779,24 +895,92 @@ class YoutubeAdapter(BaseVideoAdapter):
                     now, enabled, (after.get("layout_state") or {}).get("confidence")))
         return result
 
-    async def toggle_theater_mode(self) -> dict[str, Any]:
+    async def _fast_css_enabled(self) -> bool:
+        """Включён ли режим быстрого CSS (config/behavior.json fast_css)."""
+        return bool(timing_config.get("fast_css.enabled", True))
+
+    async def ensure_fast_css(self) -> bool:
+        """Инъекция ``agent-fast-mode`` (ТЗ §9): элементы плеера доступны без hover.
+
+        YouTube скрывает контролы (.ytp-autohide), из-за чего клик по
+        .ytp-size-button ждёт наведения мыши и упирается в длинные
+        таймауты. Fast-CSS принудительно показывает контролы, отключает
+        transition/animation и удаляет класс autohide; авто-снятие класса
+        через ``auto_remove_after_ms`` (кроме keep_fast_mode).
+
+        Возвращает True, если класс применён (или уже был).
+        """
+        if not await self._fast_css_enabled():
+            return False
+        cls = str(self.selectors.get("fast_css_class")
+                  or timing_config.get("fast_css.class_name", "agent-fast-mode"))
+        remove_after_ms = int(timing_config.get("fast_css.auto_remove_after_ms", 800))
+        keep = bool(timing_config.get("fast_css.keep_fast_mode", False))
+        try:
+            applied = await self.page.evaluate(r"""
+            ([cls, removeMs, keep]) => {
+              const mp = document.querySelector('#movie_player')
+                      || document.querySelector('.html5-video-player');
+              if (!mp) return false;
+              let style = document.getElementById('agent-fast-css');
+              if (!style) {
+                style = document.createElement('style');
+                style.id = 'agent-fast-css';
+                // Показ контролов даже под ytp-autohide, мгновенные переходы.
+                style.textContent =
+                  '.' + cls + ' .ytp-controls, ' +
+                  '.' + cls + ' .ytp-autohide .ytp-chrome-bottom, ' +
+                  '.' + cls + ' .ytp-autohide .ytp-chrome-top { ' +
+                    'opacity: 1 !important; visibility: visible !important; }' +
+                  '.' + cls + ' * { transition: none !important; ' +
+                    'animation-duration: 0s !important; }';
+                (document.head || document.documentElement).appendChild(style);
+              }
+              mp.classList.add(cls);
+              mp.classList.remove('ytp-autohide');
+              if (!keep && window.__agentFastTimer) clearTimeout(window.__agentFastTimer);
+              if (!keep) {
+                window.__agentFastTimer =
+                  setTimeout(() => mp.classList.remove(cls), removeMs);
+              }
+              return true;
+            }
+            """, [cls, remove_after_ms, keep])
+            return bool(applied)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("YouTube fast-CSS: недоступна (%s)", exc)
+            return False
+
+    async def toggle_theater_mode(self, target: Any = None) -> dict[str, Any]:
         """Переключение театрального режима с дублирующими каналами (правка №3).
 
         Надёжная последовательность (spec YouTube 2024-2026):
-        1. aria/text-поиск кнопки (локале-независимые метки);
-        2. CSS .ytp-size-button (кнопка в контроллере плеера);
-        3. горячая клавиша «t» (официальная клавиша theater-режима);
+        1. горячая клавиша «t» (официальная клавиша theater-режима YT);
+        2. aria/text-поиск кнопки (локале-независимые метки);
+        3. CSS .ytp-size-button (кнопка в контроллере плеера);
         4. программный вызов .ytp-size-button.click();
-        после каждого канала — проверка смены состояния; ошибка только
-        если НИ ОДИН канал не изменил режим.
+        после каждого канала — проверка смены состояния в бюджете
+        ``timing.video_action_verification_deadline_ms`` (poll
+        ``state_poll_interval_ms``).
+
+        ТЗ §10.6 (C1): как только канал реально **dispatch**'нул переключающее
+        действие (клик/клавиша отправлены), но состояние не подтвердилось —
+        следующий переключающий канал НЕ пробуется (иначе два успешных
+        канала переключат режим туда-обратно). Возврат с ``dispatched:true``;
+        ошибка — только если НИ ОДИН канал не выполнил действие.
         """
         before = await self.get_player_modes()
         tried: list[str] = []
 
+        # ТЗ §9: fast-CSS делает контролы кликабельными без hover —
+        # каналы aria/css/js перестают ждать наведение мыши.
+        if await self._fast_css_enabled():
+            await self.ensure_fast_css()
+
         channels = (
+            ("hotkey_t", self._theater_channel_hotkey),
             ("aria_button", self._theater_channel_aria),
             ("css_size_button", self._theater_channel_css),
-            ("hotkey_t", self._theater_channel_hotkey),
             ("js_click", self._theater_channel_js),
         )
 
@@ -812,12 +996,14 @@ class YoutubeAdapter(BaseVideoAdapter):
                 continue
             tried.append(name)
 
-            after = await self.get_player_modes()
-            if after.get("theater_mode") != before.get("theater_mode"):
+            changed, after = await self._wait_theater_change(
+                before_theater=bool(before.get("theater_mode")))
+            if changed:
                 return {
                     "ok": True,
                     "action": "toggle_theater_mode",
                     "method": name,
+                    "dispatched": True,
                     "theater_mode": after.get("theater_mode"),
                     "before_class": before.get("container_class", ""),
                     "after_class": after.get("container_class", ""),
@@ -827,18 +1013,63 @@ class YoutubeAdapter(BaseVideoAdapter):
                     ),
                     "tried_channels": tried,
                 }
+            # --- ТЗ §10.6: действие dispatch'нуто, состояние не
+            # подтвердилось -> запрет повторного переключающего канала.
             logger.info(
-                "YouTube theater: канал %s выполнен, состояние не изменилось",
+                "YouTube theater: канал %s dispatched, состояние не "
+                "подтверждено в бюджете — повторное переключение запрещено",
                 name)
+            return {
+                "ok": False,
+                "action": "toggle_theater_mode",
+                "method": name,
+                "dispatched": True,
+                "error_code": "STATE_VERIFICATION_UNCERTAIN",
+                "theater_mode": (after.get("layout_state") or {}).get(
+                    "theater_mode", before.get("theater_mode")),
+                "layout": after.get("layout_state") or {},
+                "before_class": before.get("container_class", ""),
+                "tried_channels": tried,
+            }
 
         raise ElementNotFoundError(
-            "YouTube: переключение театрального режима не подтверждено ни "
-            "одним из каналов (aria-кнопка, .ytp-size-button, клавиша «t», "
-            "JS click). Возможно, страница ещё не загрузила плеер или "
-            "режим недоступен на этом типе страницы.",
+            "YouTube: ни один канал не выполнил переключающее действие "
+            "(клавиша «t», aria-кнопка, .ytp-size-button, JS click). "
+            "Возможно, страница ещё не загрузила плеер или режим недоступен "
+            "на этом типе страницы.",
             tried_channels=tried,
             before_theater=before.get("theater_mode"),
         )
+
+    async def _wait_theater_change(self, before_theater: bool,
+                                   deadline_ms: int | None = None,
+                                   poll_ms: int | None = None,
+                                   ) -> tuple[bool, dict[str, Any]]:
+        """Ожидание смены theater_mode в пределах бюджета верификации.
+
+        Poll-цирк по ``timing.state_poll_interval_ms`` (20 мс) вместо
+        одного длинного сна; выход раньше при первом изменении (ТЗ §7.2).
+        """
+        if deadline_ms is None:
+            deadline_ms = int(timing_config.get(
+                "timing.video_action_verification_deadline_ms", 1500))
+        if poll_ms is None:
+            poll_ms = max(5, int(timing_config.get(
+                "timing.state_poll_interval_ms", 20))) / 1000.0
+        loop = asyncio.get_running_loop()
+        end = loop.time() + deadline_ms / 1000.0
+        after: dict[str, Any] = {}
+        while True:
+            after = await self.get_player_modes()
+            if bool(after.get("theater_mode")) != before_theater:
+                return True, after
+            if loop.time() >= end:
+                return False, after
+            await asyncio.sleep(poll_ms)
+
+    async def _channel_timeout_ms(self, default: int = 300) -> int:
+        """Бюджет одного переключающего канала (ТЗ §7.2/§9: 150–300 мс)."""
+        return int(timing_config.get("timing.element_check_timeout_ms", default))
 
     async def _theater_channel_aria(self) -> bool:
         aria_labels = self.selectors.get(
@@ -846,13 +1077,14 @@ class YoutubeAdapter(BaseVideoAdapter):
             ["Theater mode", "Широкоэкранный режим",
              "Toggle theater mode", "Переключить широкоэкранный режим",
              "Widescreen mode", "Wide screen mode"])
-        btn = await self._find_by_aria(aria_labels, timeout_ms=2000)
+        budget = await self._channel_timeout_ms()
+        btn = await self._find_by_aria(aria_labels, timeout_ms=budget)
         if btn is None:
-            btn = await self._find_by_text(aria_labels, timeout_ms=800)
+            btn = await self._find_by_text(aria_labels, timeout_ms=budget // 2)
         if btn is None:
             return False
         try:
-            await btn.click(timeout=2000)
+            await btn.click(timeout=budget)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("YouTube theater: клик по aria-кнопке: %s", exc)
@@ -861,13 +1093,19 @@ class YoutubeAdapter(BaseVideoAdapter):
     async def _theater_channel_css(self) -> bool:
         selector = self.selectors.get(
             "theater_button_selector", ".ytp-size-button")
-        btn = self.page.locator(selector).first
-        try:
-            await btn.wait_for(state="visible", timeout=1500)
-            await btn.click(timeout=2000)
-            return True
-        except Exception:  # noqa: BLE001
-            return False
+        budget = await self._channel_timeout_ms()
+        candidates = self.selectors.get("theater_button_selectors") or [selector]
+        for sel in candidates:
+            btn = self.page.locator(sel).first
+            try:
+                # Fast-CSS уже показал контролы — ждём элемент в коротком
+                # бюджете канала вместо hover + 1500 мс (ТЗ §9).
+                await btn.wait_for(state="visible", timeout=budget)
+                await btn.click(timeout=budget)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
 
     async def _theater_channel_hotkey(self) -> bool:
         """Горячая клавиша «t» (официальная клавиша theater-режима YT).
