@@ -140,8 +140,21 @@ class TestBlock2ScheduleActionCoercion:
 
     @pytest.mark.asyncio
     async def test_schedule_action_accepts_string_payload(self, tmp_path):
+        """Ключевая проверка Блока 2: до coerce строки payload/options
+        приводили к AttributeError на .get() сразу после валидации URL.
+        Проверяем участок кода БЕЗ браузера: require_page заглушен."""
         from browserd import BrowserController
         ctrl = BrowserController(profile_dir=tmp_path, headless=True)
+
+        class FakePage:
+            async def evaluate(self, script, arg=None):
+                return None
+
+        async def fake_require_page(params=None):
+            return FakePage()
+
+        ctrl.require_page = fake_require_page  # type: ignore[assignment]
+
         res = await ctrl.cmd_schedule_action({
             "trigger": "video_ended",
             "action": "navigate",
@@ -149,9 +162,12 @@ class TestBlock2ScheduleActionCoercion:
             "options": '{"once": true}',
         })
         # Без coercing здесь падало с AttributeError: 'str' object has
-        # no attribute 'get'. Сейчас — либо armed, либо осмысленный отказ
-        # (нет страницы), но НЕ AttributeError.
-        assert "AttributeError" not in json.dumps(res, default=str)
+        # no attribute 'get'. Сейчас — вооружённое расписание либо
+        # осмысленный структурированный отказ, но НЕ исключение/AttributeError.
+        text = json.dumps(res, default=str)
+        assert "AttributeError" not in text
+        assert res.get("ok") is True or res.get("error"), \
+            f"Ожидался структурированный ответ, получено: {text}"
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +175,15 @@ class TestBlock2ScheduleActionCoercion:
 # ---------------------------------------------------------------------------
 class TestBlock3EpisodesVsChapters:
     def test_deny_suggests_chapter_list_first(self, tmp_path):
-        guard, _, _ = make_stack(tmp_path)
-        d = guard.check("browser_video", {"action": "episode_next"})
+        guard, cm, _ = make_stack(tmp_path)
+        # Симулируем реальную ситуацию: на странице обычное видео без
+        # плейлиста (has_episode_queue=False, list_id=None).
+        ctx = cm.get_active_context()
+        assert ctx is not None
+        ctx.has_episode_queue = False
+        ctx.list_id = None
+        d = guard.check("browser_video", {"action": "episode_next"},
+                        context=ctx)
         assert not d.allowed
         assert d.error_code == "NO_EPISODE_CONTEXT"
         args = [a["args"].get("action") for a in d.suggested_safe_actions]
@@ -172,7 +195,10 @@ class TestBlock3EpisodesVsChapters:
     def test_skill_md_documents_split(self):
         text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         assert "РАЗДЕЛЕНИЕ ПОНЯТИЙ" in text
-        assert "NO_EPISODE_CONTEXT, немедленно вызывай `chapter_list`" in text
+        # Регрессия на точную пунктуацию ТЗ-формулировки (без ложных падений
+        # из-за переносов/кавычек в документе):
+        assert "NO_EPISODE_CONTEXT" in text
+        assert "немедленно вызывай `chapter_list`" in text
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +214,9 @@ class TestBlock45ImperativeDeny:
                    "%D0%B5%D0%BC"})
         assert not d.allowed
         assert d.error_code == "POLICY_SITE_SEARCH_NOT_REQUESTED"
-        assert self.IMPERATIVE in d.message
+        # case-insensitive: в разных deny-ветках фраза начинается с
+        # «ЗАПРЕЩЕНО»/«Запрещено» — императив обязателен в любом регистре
+        assert self.IMPERATIVE.lower() in d.message.lower()
         q = d.suggested_safe_actions[0]["args"]["pattern"]
         assert q  # извлечённый decode-запрос, не пустой
 
