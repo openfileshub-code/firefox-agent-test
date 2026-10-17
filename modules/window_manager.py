@@ -149,6 +149,16 @@ class WindowManager:
         if width <= 0 or height <= 0:
             return False
         cfg = self.config
+        # ТЗ v2.0 §13.3: в headless/minimized окне outerWidth/Height равны 0
+        # или фиктивным — такую геометрию не сохраняем, иначе конфиг-зеркало
+        # портится и следующая навигация применяет мусорные размеры.
+        if bool(geo.get("headless")) or bool(geo.get("minimized")):
+            return False
+        if width < 200 or height < 150:
+            logger.debug(
+                "WindowManager: подозрительная геометрия %dx%d "
+                "(headless/minimized?) — пропуск записи", width, height)
+            return False
         changed = (
             cfg.get("width") != width
             or cfg.get("height") != height
