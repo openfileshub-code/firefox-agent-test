@@ -1,5 +1,5 @@
 ---
-name: firefox-agent-browser
+name: firefox-agent
 description: Практичный порядок работы агента с Firefox/Camoufox MCP. Приоритет — точное выполнение запроса пользователя за минимальное число действий.
 ---
 
