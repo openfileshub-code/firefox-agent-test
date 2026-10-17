@@ -64,3 +64,10 @@
 2026-10-17 12:16:43,591 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
 2026-10-17 12:16:43,591 INFO tool=tabs action=tabs duration_ms=201 ok=False error_code=COMMAND_TIMEOUT
 2026-10-17 12:16:43,595 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 16:04:29,764 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 16:04:29,765 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 16:04:29,942 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 16:04:29,944 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 16:04:30,160 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 16:04:30,160 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 16:04:30,164 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
