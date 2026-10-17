@@ -933,18 +933,45 @@ class BrowserController:
 
         Координаты в конфиге — CSS px; на Windows пересчёт в физические
         пиксели выполняет os_window_control через масштаб DPI/scale.
+
+        ТЗ v2.0 §13.3 (C4): Win32-вызовы синхронные и могут блокировать
+        event loop демона (EnumWindows перебирает все окна системы), поэтому
+        выполняются через asyncio.to_thread. Исключение/ошибка probe не
+        проглатывается молча — пишется с указанием причины (§13.4).
         """
         try:
             from modules import os_window_control
 
-            applied = os_window_control.apply_geometry(
-                x=int(cfg.get("x", 0) or 0),
-                y=int(cfg.get("y", 0) or 0),
-                width=int(cfg["width"]),
-                height=int(cfg["height"]),
-                scale=scale,
-            )
-            log.info("os_window_control.apply_geometry -> %s", applied)
+            async def _run():
+                return await asyncio.to_thread(
+                    os_window_control.apply_geometry,
+                    x=int(cfg.get("x", 0) or 0),
+                    y=int(cfg.get("y", 0) or 0),
+                    width=int(cfg["width"]),
+                    height=int(cfg["height"]),
+                    scale=scale,
+                )
+
+            task = asyncio.create_task(_run())
+
+            def _done(t: "asyncio.Task") -> None:
+                try:
+                    applied = t.result()
+                    if isinstance(applied, dict) and applied.get("ok") is False:
+                        log.warning(
+                            "os_window_control.apply_geometry failed: "
+                            "error_code=%s reason=%s",
+                            applied.get("error_code", "OS_WINDOW_APPLY_FAILED"),
+                            applied.get("error") or applied.get("message"),
+                        )
+                    else:
+                        log.info("os_window_control.apply_geometry -> %s", applied)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "os_window_control.apply_geometry raised: %s: %s",
+                        type(exc).__name__, exc)
+
+            task.add_done_callback(_done)
         except ImportError as exc:
             log.warning("os_window_control недоступен: %s", exc)
         except Exception as exc:  # noqa: BLE001
@@ -1065,14 +1092,24 @@ class BrowserController:
         """
         Диагностическая проверка. Ошибки меняют state на degraded,
         но никогда не закрывают страницу, контекст или процесс.
+
+        ТЗ v2.0 §13 (C4): heartbeat пишется каждый цикл с указанием
+        причины деградации; probe-ошибка логируется с типом и сообщением
+        (не проглатывается молча); тяжёлые синхронные операции вынесены
+        в worker-потоки (_apply_os_geometry / window_manager.save).
         """
         while not self.stopping:
             await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
 
             page = self._resolve_page()
             if page is None:
+                self.state.write(
+                    status=self.state.read().get("status", "running"),
+                    last_heartbeat=utc_now(),
+                )
                 continue
 
+            probe_error = ""
             try:
                 result = await asyncio.wait_for(
                     page.evaluate("1"),
@@ -1082,8 +1119,10 @@ class BrowserController:
                     self._watchdog_failures = 0
                 else:
                     self._watchdog_failures += 1
+                    probe_error = "probe вернул %r вместо 1" % (result,)
             except Exception as exc:
                 self._watchdog_failures += 1
+                probe_error = "%s: %s" % (type(exc).__name__, exc)
                 log.warning(
                     "Watchdog probe failed (%d): %s",
                     self._watchdog_failures,
@@ -1101,10 +1140,15 @@ class BrowserController:
                 if self._watchdog_failures >= 3
                 else "running"
             )
+            # Heartbeat + причина разрыва/деградации (ТЗ §13.4): агент по
+            # state-файлу видит, жив ли демон и почему стал degraded.
             self.state.write(
                 status=status,
                 watchdog_failures=self._watchdog_failures,
                 last_watchdog=utc_now(),
+                last_heartbeat=utc_now(),
+                degraded_reason=(probe_error
+                                 if status == "degraded" else None),
             )
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -2279,6 +2323,45 @@ class BrowserController:
         return max(0.0, min(1.0, number)), None
 
     async def cmd_video_action(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Видеокоманда с жёстким бюджетом исполнения (ТЗ v2.0 §7.2/§13).
+
+        Дефолт 2500 мс (config/behavior.json: daemon.command_hard_timeout_ms).
+        По истечении бюджета возвращается структурированный
+        DISPATCH_UNCONFIRMED: команда могла частично исполниться, состояние
+        неизвестно — повтор переключающего действия запрещён (§10.6).
+        """
+        try:
+            from modules.timing_config import get as _tb_get
+
+            hard_ms = int(_tb_get("daemon.command_hard_timeout_ms", 2500))
+        except Exception:  # noqa: BLE001
+            hard_ms = 2500
+        hard_ms = max(500, min(hard_ms, 20_000))
+        try:
+            return await asyncio.wait_for(
+                self._video_action_inner(params), timeout=hard_ms / 1000.0)
+        except asyncio.TimeoutError:
+            log.warning(
+                "cmd_video_action hard budget exceeded: "
+                "action=%s duration_ms>=%d ok=false error_code=DISPATCH_UNCONFIRMED",
+                str(params.get("action") or ""), hard_ms,
+            )
+            return {
+                "ok": False,
+                "error_code": "DISPATCH_UNCONFIRMED",
+                "error": "DISPATCH_UNCONFIRMED",
+                "message": (
+                    "Команда не подтверждена демоном за %d мс; она могла "
+                    "частично исполниться — фактическое состояние плеера "
+                    "неизвестно." % hard_ms),
+                "hint": "Не повторяйте переключающее действие. Сначала "
+                        "browser_video action=\"layout_state\" для снимка "
+                        "состояния; при uncertain — сообщите пользователю.",
+                "state_uncertain": True,
+                "hard_timeout_ms": hard_ms,
+            }
+
+    async def _video_action_inner(self, params: dict[str, Any]) -> dict[str, Any]:
         page = await self.require_page(params)
         action = str(params.get("action") or "").strip().lower()
         # ТЗ 4.2: canonical-параметр — value; target принимается для
