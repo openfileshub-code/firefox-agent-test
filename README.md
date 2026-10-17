@@ -128,7 +128,7 @@ py -3 -m venv "$Project\.venv"
 Файл `SKILL.md` содержит системный промпт (Agent Skill), который обучает ИИ-агента правильному протоколу работы с браузером: правилу одного хода, строгой политике одной вкладки, защите от слепых повторов и правилам работы с видео, формами и капчей.
 
 ### Для Unsloth
-Если вы используете среду **Unsloth** (как в текущем окружении), скилл активируется автоматически при регистрации в каталоге навыков платформы. Поместите репозиторий в доступную директорию, и Unsloth подхватит `SKILL.md` как enabled skill `firefox-agent-browser`.
+Если вы используете среду **Unsloth** (как в текущем окружении), скилл активируется автоматически при регистрации в каталоге навыков платформы. Поместите репозиторий в доступную директорию, и Unsloth подхватит `SKILL.md` как enabled skill `firefox-agent`.
 
 ### Для других MCP-хостов (Claude Desktop, Cursor и т.д.)
 1. Скопируйте путь к файлу `SKILL.md` (например, `E:\Program\AI Exlinks\firefox-agent-test\SKILL.md`).
@@ -367,7 +367,7 @@ The project includes a built-in **Agent Skill** (`SKILL.md`) — a system prompt
 
 ### 🧠 Activating the Agent Skill (SKILL.md)
 The `SKILL.md` file contains the system prompt that teaches the AI agent the correct browser interaction protocol.
-- **For Unsloth:** The skill is auto-detected as `firefox-agent-browser` when the repository is registered in the platform's skill catalog.
+- **For Unsloth:** The skill is auto-detected as `firefox-agent` when the repository is registered in the platform's skill catalog.
 - **For other MCP hosts:** Copy the contents of `SKILL.md` into your agent's system prompt or custom instructions.
 - **Customization:** Use `config/user_tool_settings.json` instead of editing `SKILL.md` directly. Copy from `user_tool_settings.example.json` to get started.
 

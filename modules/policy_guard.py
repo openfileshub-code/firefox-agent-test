@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from modules import url_validator as uv
 
@@ -535,6 +536,31 @@ class PolicyGuard:
             confirmation=False)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _norm_nav_url(url: str) -> str:
+        """Канонический URL для url_history (совпадает с
+        ContextManager._norm_url: host без www + path + query)."""
+        try:
+            p = urlparse(str(url or ""))
+        except ValueError:
+            return ""
+        if not p.netloc:
+            return ""
+        host = (p.netloc or "").lower().removeprefix("www.")
+        path = (p.path or "/").rstrip("/") or "/"
+        q = ("?" + p.query) if p.query else ""
+        return host + path + q
+
+    @staticmethod
+    def _is_root_path(url: str) -> bool:
+        """URL указывает на корень сайта (path пустой или '/')?"""
+        try:
+            p = urlparse(str(url or ""))
+        except ValueError:
+            return False
+        return (p.path or "/").strip("/") == ""
+
+    # ------------------------------------------------------------------
     def _check_url(self, tool, args, ctx, s) -> PolicyDecision:
         url = str(args.get("url") or "")
         if not url:
@@ -588,6 +614,62 @@ class PolicyGuard:
                 message=vr.message or "Невалидный YouTube video_id",
                 suggestions=[{"tool": "browser_find_link",
                               "args": {"pattern": ""}}])
+        # --- ТЗ блок 6 (6.3): возврат по истории вместо navigate ---------
+        # «назад / предыдущая страница» — только browser_history_back;
+        # навигация ВПЕРЁД на URL, который уже есть в посещённой истории
+        # текущей вкладки (url_history), блокируется с готовым suggestion.
+        if tool == "browser_navigate" and not args.get("new_tab") \
+                and ctx is not None:
+            visited = list(getattr(ctx, "url_history", []) or [])
+            target_norm = self._norm_nav_url(url)
+            cur_norm = self._norm_nav_url(getattr(ctx, "url", "") or "")
+            if target_norm and visited and target_norm in visited[:-1] \
+                    and target_norm != cur_norm:
+                return _deny(
+                    "POLICY_USE_HISTORY_BACK", tool, args,
+                    message="Возврат на ранее посещённую страницу '%s' "
+                            "выполняется ТОЛЬКО через browser_history_back "
+                            "(browser_go_back). browser_navigate — это переход "
+                            "ВПЕРЁД по URL; он теряет позицию в истории. "
+                            "НЕМЕДЛЕННО вызови browser_history_back — первое "
+                            "действие из suggested_safe_actions "
+                            "(priority='immediate'). ЗАПРЕЩЕНО повторять "
+                            "заблокированный browser_navigate." % url,
+                    suggestions=[_history_back_suggestion(url)])
+        # --- ТЗ блок 7 (7.2/7.4): запрет деструктивных перезагрузок ------
+        # Переход на корень текущего сайта (или тот же URL) при активном
+        # watch/search_results контексте уничтожает DOM, кэш и результаты
+        # поиска — блокируется; поиск выполняется строго на текущей
+        # открытой вкладке через browser_search_on_page.
+        if tool == "browser_navigate" and ctx is not None:
+            page_type = getattr(ctx, "page_type", "") or ""
+            if page_type in DESTRUCTIVE_PAGE_TYPES:
+                cur_host = _norm_host(getattr(ctx, "site", "")
+                                      or getattr(ctx, "url", "") or "")
+                tgt_host = _norm_host(url)
+                cur_norm = self._norm_nav_url(getattr(ctx, "url", "") or "")
+                tgt_norm = self._norm_nav_url(url)
+                root_hit = bool(cur_host) and tgt_host == cur_host \
+                        and self._is_root_path(url)
+                same_hit = bool(cur_norm) and tgt_norm == cur_norm
+                if root_hit or same_hit:
+                    what = ("тот же URL" if same_hit
+                            else "главную страницу текущего сайта")
+                    return _deny(
+                        "POLICY_DESTRUCTIVE_RELOAD_FORBIDDEN", tool, args,
+                        message="ПЕРЕЗАГРУЗКА СТРАНИЦЫ ЗАПРЕЩЕНА! Переход на "
+                                "%s ('%s') при открытой странице типа '%s' "
+                                "уничтожит текущий DOM, кэш и результаты "
+                                "поиска. Выполняй browser_search_on_page "
+                                "СТРОГО на текущей открытой вкладке без "
+                                "перезагрузки. НЕМЕДЛЕННО вызови "
+                                "browser_search_on_page — первое действие из "
+                                "suggested_safe_actions (priority='immediate')."
+                                % (what, url, page_type),
+                        suggestions=[_search_page_suggestion(
+                            "", "Поиск выполняется на ТЕКУЩЕЙ странице без "
+                                "перезагрузки"),
+                            {"tool": "browser_get_context", "args": {}}])
         # same-tab: навигация с уходом с текущего сайта при locked контексте
         if tool == "browser_navigate" and not args.get("new_tab"):
             if ctx is not None and getattr(ctx, "same_tab_required", False) \

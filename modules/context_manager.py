@@ -118,6 +118,8 @@ class BrowserContext:
     title: str = ""
     has_episode_queue: bool = False
     history: list = field(default_factory=list)  # последние (tool, sig, ok)
+    #: последние посещённые URL вкладки — для POLICY_USE_HISTORY_BACK (ТЗ 6.3)
+    url_history: list = field(default_factory=list)  # список norm-URL, без повторов
     #: маркер «элемент скрыт» для POLICY_HIDDEN_ELEMENT_REQUIRES_EXPAND
     pending_hidden_element: str = ""
     expanded_since_hidden: bool = False
@@ -184,6 +186,48 @@ class ContextManager:
     def set_settings(self, settings) -> None:
         self._settings = settings
         self._ctx.apply_settings(settings)
+
+    # ------------- history of visited URLs -------------
+    @staticmethod
+    def _norm_url(url: str) -> str:
+        """Канонический URL для url_history: hostname без www + path + query."""
+        try:
+            p = urlparse(str(url or ""))
+        except ValueError:
+            return ""
+        if not p.netloc:
+            return ""
+        host = (p.netloc or "").lower().removeprefix("www.")
+        path = (p.path or "/").rstrip("/") or "/"
+        q = ("?" + p.query) if p.query else ""
+        return host + path + q
+
+    def note_pending_navigation(self, url: str) -> None:
+        """Перед фактической навигацией записать ТЕКУЩИЙ URL в историю
+        посещений вкладки — это база для POLICY_USE_HISTORY_BACK (ТЗ 6.3):
+        guard видит, что целевой URL уже был посещён, и требует
+        browser_history_back вместо перехода вперёд."""
+        ctx = self._ctx
+        cur_norm = self._norm_url(ctx.url)
+        nxt_norm = self._norm_url(url)
+        if not cur_norm or cur_norm == nxt_norm:
+            return
+        if cur_norm in ctx.url_history:
+            ctx.url_history.remove(cur_norm)
+        ctx.url_history.append(cur_norm)
+        ctx.url_history = ctx.url_history[-25:]
+
+    def record_visited_url(self, url: str) -> None:
+        """Зафиксировать успешный переход по URL (после cmd_navigate)."""
+        ctx = self._ctx
+        norm = self._norm_url(url)
+        if not norm:
+            return
+        for h in list(ctx.url_history):
+            if h == norm:
+                ctx.url_history.remove(h)
+        ctx.url_history.append(norm)
+        ctx.url_history = ctx.url_history[-25:]
 
     # ------------- updates -------------
     def update_from_result(self, tool: str, args: dict, result: dict) -> BrowserContext:

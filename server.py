@@ -483,7 +483,7 @@ async def lifespan(_server):
         await connector.disconnect()
 
 
-mcp = FastMCP("camoufox-browserd", lifespan=lifespan)
+mcp = FastMCP("firefox-agent", lifespan=lifespan)
 
 
 #: соответствие MCP tool -> команда демона (для enrich/маршрутизации)
