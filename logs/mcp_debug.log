@@ -1,0 +1,52 @@
+2026-10-17 09:18:15,903 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
+2026-10-17 09:26:41,148 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
+2026-10-17 09:39:38,154 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
+2026-10-17 09:39:42,143 INFO PolicyGuard deny: browser_new_tab POLICY_NEW_TAB_NOT_ALLOWED (SKILL.md §Жёсткая политика вкладок)
+2026-10-17 09:41:57,567 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:43:21,061 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:44:21,037 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:44:21,040 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 09:44:43,536 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 09:44:43,537 INFO tool=tabs action=tabs duration_ms=201 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 09:44:43,539 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 09:44:48,347 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:44:48,349 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 09:44:48,563 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 09:44:48,563 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 09:44:48,566 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 09:48:03,645 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:48:03,648 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 09:48:03,869 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 09:48:03,870 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 09:48:03,872 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 09:52:45,638 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 09:52:45,640 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 09:52:45,854 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 09:52:45,854 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 09:52:45,857 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 11:20:06,513 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:20:06,514 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:22:06,184 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:22:06,184 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:22:23,924 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:22:23,925 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:23:50,034 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:23:50,035 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:26:24,124 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:26:24,124 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:00,297 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:27:00,298 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:03,537 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:27:03,538 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:03,641 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 11:27:03,643 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:03,854 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 11:27:03,854 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 11:27:03,856 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:21,012 INFO PolicyGuard deny (site_search): POLICY_SITE_SEARCH_NOT_REQUESTED
+2026-10-17 11:27:21,013 INFO tool=site_search action=site_search duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:21,122 INFO PolicyGuard deny: browser_new_tab POLICY_SITE_SEARCH_NOT_REQUESTED (SKILL.md §Поиск на сайте)
+2026-10-17 11:27:21,123 INFO tool=browser_navigate action=navigate duration_ms=0 ok=True error_code=-
+2026-10-17 11:27:21,334 WARNING action=tabs duration_ms=200 ok=false error_code=COMMAND_TIMEOUT
+2026-10-17 11:27:21,334 INFO tool=tabs action=tabs duration_ms=200 ok=False error_code=COMMAND_TIMEOUT
+2026-10-17 11:27:21,336 INFO tool=tabs action=tabs duration_ms=0 ok=True error_code=-

@@ -402,7 +402,7 @@ class PolicyGuard:
                             code, tool, args,
                             message="Инструмент '%s' запрещён правилами сайта "
                                     "user_tool_settings.json" % tool,
-                            suggestions=[{"tool": "browser_get_context"}],
+                            suggestions=[{"tool": "browser_get_context", "args": {}}],
                         )
 
         return ALLOW
@@ -560,7 +560,7 @@ class PolicyGuard:
                             message="Контекст зафиксирован на '%s'; переход на "
                                     "'%s' без разрешения пользователя." %
                                     (cur_host, target_host),
-                            suggestions=[{"tool": "browser_get_context"},
+                            suggestions=[{"tool": "browser_get_context", "args": {}},
                                          {"tool": "browser_video",
                                           "args": {"action": "state"}}],
                             confirmation=True)
@@ -723,7 +723,7 @@ class PolicyGuard:
                                   "args": {"action": "chapter_list"}},
                                  {"tool": "browser_video",
                                   "args": {"action": "episode_list"}},
-                                 {"tool": "browser_get_context"}])
+                                 {"tool": "browser_get_context", "args": {}}])
 
         # video-mutation vs radio drift (ожидаемое видео)
         if action in VIDEO_MUTATION_ACTIONS and ctx is not None:
@@ -739,7 +739,7 @@ class PolicyGuard:
                     suggestions=[{"tool": "browser_video",
                                   "args": {"action": "episode_open",
                                            "value": expected}},
-                                 {"tool": "browser_get_context"}])
+                                 {"tool": "browser_get_context", "args": {}}])
 
         # post-verification включена глобально — требуйте verify flag
         if action in VIDEO_MUTATION_ACTIONS and s.g("verify_after_mutation") \
@@ -772,7 +772,7 @@ class PolicyGuard:
                     message="Повтор #%d идентичного mutate-действия без "
                             "изменения состояния (> max_retries=%d)." %
                             (n + 1, max_retries),
-                    suggestions=[{"tool": "browser_get_context"},
+                    suggestions=[{"tool": "browser_get_context", "args": {}},
                                  {"tool": "browser_screenshot"}])
         return ALLOW
 
