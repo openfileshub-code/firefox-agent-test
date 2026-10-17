@@ -58,3 +58,34 @@ theater_set → fast-CSS → учёт ввода → таймауты/watchdog �
 Корневые причины R1–R7: все подтверждённые устранены (R1→C2, R2→C1, R3→таймауты behavior.json+hard budgets, R4→fast-CSS, R5→C4, R6→C5/C6/C7+browser_site_search, R7→C8/SKILL).
 
 Итоговая верификация: pytest — все тесты зелёные (включая новые test_youtube_theater*, test_server_timeout, test_policy_guard*), git-история содержит коммиты этапов 0–10.
+
+---
+
+## Изменения в v6.0 (2026-10-18): Policy Guard v2.0, Intent Redirect, Anti-Panic Lock
+
+### Policy Guard v2.0 (Intercept & Translate)
+- Переход от hard block к перехвату намерения: `modules/policy_guard.py` — enum `PolicyVerdict` (`ALLOWED` / `BLOCKED` / `INTENT_REDIRECT`), метод `evaluate_intent()`.
+- Новый тип ответа `INTENT_REDIRECT_*` с полем `system_injection` — готовый пошаговый алгоритм коррекции для LLM вместо простого отказа.
+- Формат `to_dict()` дополнен полями `ok`, `system_injection`, `__system_injection__` (`priority: "critical"`, `required_action: "immediate_correction"`) для MCP-хостов.
+- Перехватываемые сценарии: site-search на YouTube (`INTENT_REDIRECT_SITE_SEARCH_DESTRUCTIVE`), навигация на `/results?search_query=` (`INTENT_REDIRECT_NAVIGATE_TO_SEARCH_URL`), возврат на корень при открытых результатах (`INTENT_REDIRECT_ROOT_NAVIGATION`).
+
+### Anti-Panic Lock и Context Sanctity
+- `modules/context_manager.py`: `set_panic_lock()` / `is_tool_blocked()` / `clear_panic_lock()`, константа `PANIC_LOCK_DEFAULT_TOOLS`.
+- После `INTENT_REDIRECT` деструктивные инструменты (`web_search`, `google-search`, `duckduckgo-search`, `browser_navigate`, site-search) блокируются на ~10 секунд; повторная попытка → `PANIC_LOOP_DETECTED` с recovery-инъекцией.
+- `server.py` (middleware `call()`): проверка лока до guard'а, установка лока при redirect, снятие лока при успешном вызове безопасного инструмента (защита от протечки состояния между tool calls).
+
+### Рефакторинг инструментов (Sprint 1)
+- `browser_site_search` → `browser_navigate_to_search_results` (явное указание на деструктивность navigate/reload).
+- `browser_search_on_page` → `browser_dom_text_search` (аналог Ctrl+F, без перезагрузки).
+- `browser_find_link` → `browser_find_interactive_element` (не только ссылки: кнопки, видео).
+- Новый инструмент `browser_ui_search_box` (поиск через UI сайта: клик по `input[type='search']`, ввод, Enter — обёртка над page_agent).
+- Описания инструментов усилены CAPS-LOCK триггерами (`ВНИМАНИЕ`, `ПЕРЕЗАГРУЖАЕТ`, `УНИЧТОЖАЕТ`); старые имена доступны как алиасы (обратная совместимость).
+
+### SKILL.md
+- Добавлены разделы: «Recovery Protocols» (протокол обработки POLICY_DENY/INTENT_REDIRECT), «Неприкосновенность контекста (Context Sanctity)», «Anti-Panic Lock».
+- Few-Shot примеры правильного/неправильного поведения при поиске на открытой странице YouTube.
+
+### Тестирование
+- Новые тесты: `tests/test_intent_redirect_v2.py` (intent redirect, panic lock, expiration, clear-on-safe-call).
+- `tests/conftest.py`: autouse-фикстура `reset_server_state` — изоляция глобального singleton-состояния server между тестами.
+- Итоговая верификация: pytest — **212 passed, 0 failed**.
