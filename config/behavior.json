@@ -24,10 +24,21 @@
     "quiescence_ms": 250,
     "max_wait_for_quiescence_ms": 300,
     "abort_on_activity": true,
-    "tracked_events": ["mousemove", "mousedown", "keydown", "wheel", "touchstart"]
+    "tracked_events": [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "wheel",
+      "touchstart"
+    ]
   },
   "youtube": {
-    "theater_channels": ["keyboard_t", "aria_button", "ytp_size_button", "js_click"],
+    "theater_channels": [
+      "keyboard_t",
+      "aria_button",
+      "ytp_size_button",
+      "js_click"
+    ],
     "allow_state_uncertain": true,
     "no_repeat_after_dispatch": true,
     "min_confidence_for_toggle": 0.8
@@ -35,7 +46,8 @@
   "policy": {
     "max_same_policy_denials": 2,
     "auto_execute_first_safe_action": false,
-    "return_structured_errors_only": true
+    "return_structured_errors_only": true,
+    "site_search_budget_ms": 8000
   },
   "daemon": {
     "command_hard_timeout_ms": 2500,

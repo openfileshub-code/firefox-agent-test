@@ -32,6 +32,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from adapters.base import structured_error
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_PROFILE = BASE_DIR / "playwright_profile"
@@ -3502,6 +3504,127 @@ class BrowserController:
         _params: dict[str, Any],
     ) -> dict[str, Any]:
         return {"ok": True, "events": self._network_events[-100:]}
+
+    # --- ТЗ §15.4 (C6): site search как отдельная команда демона ---
+    # Селекторы берутся из config/player_selectors.json (секция сайта по
+    # домену текущей страницы), с URL-фолбэком для YouTube. Фолбэк — это
+    # НЕ обход политики: виртуальный инструмент
+    # browser_navigate_to_search_url перехватывает навигацию на URL выдачи
+    # в middleware и требует override_phrase при allow_site_search=false.
+
+    _SITE_SEARCH_URL_TEMPLATES = {
+        "youtube": "https://www.youtube.com/results?search_query={query}",
+    }
+
+    @staticmethod
+    def _site_key_from_url(url: str) -> str:
+        u = str(url or "").lower()
+        if "youtube.com" in u or "youtu.be" in u:
+            return "youtube"
+        if "rutube.ru" in u:
+            return "rutube"
+        if "vk.com" in u:
+            return "vk"
+        if "twitch.tv" in u:
+            return "twitch"
+        return ""
+
+    async def cmd_site_search(self, params: dict[str, Any]) -> dict[str, Any]:
+        query = str(params.get("query") or "").strip()
+        if not query:
+            return structured_error(
+                "INVALID_PARAMS",
+                "Поисковый запрос не задан (параметр query обязателен)",
+            )
+        page = await self.require_page(params)
+        try:
+            from adapters.base import load_selector_config
+            cfg = load_selector_config() or {}
+        except Exception:  # noqa: BLE001
+            cfg = {}
+
+        site_key = str(params.get("site") or "").strip().lower()
+        if site_key not in cfg:
+            site_key = self._site_key_from_url(page.url)
+        section = cfg.get(site_key) if site_key else None
+        search_cfg = (section or {}).get("site_search") or {}
+        input_sel = [str(x) for x in (search_cfg.get("input_selectors") or [])]
+        button_sel = [str(x) for x in (search_cfg.get("button_selectors") or [])]
+
+        budget_ms = 8000
+        with contextlib.suppress(Exception):
+            from modules import timing_config
+            budget_ms = int(timing_config.get(
+                "policy.site_search_budget_ms", 8000) or 8000)
+
+        if input_sel:
+            filled = False
+            for sel in input_sel:
+                try:
+                    loc = page.locator(sel).first
+                    await loc.wait_for(state="visible", timeout=1500)
+                    await loc.click(timeout=1500)
+                    await loc.fill(query, timeout=1500)
+                    filled = True
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            if filled:
+                submitted = False
+                for sel in button_sel:
+                    try:
+                        await page.locator(sel).first.click(timeout=1500)
+                        submitted = True
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
+                if not submitted:
+                    with contextlib.suppress(Exception):
+                        await page.keyboard.press("Enter")
+                        submitted = True
+                url_before = page.url
+                try:
+                    await page.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=min(5000, budget_ms),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return {
+                    "ok": True,
+                    "action": "site_search",
+                    "method": "form_fill",
+                    "site": site_key or "unknown",
+                    "query": query,
+                    "url_before": url_before,
+                    "url": page.url,
+                    "navigated": page.url != url_before,
+                    "tab_id": self._page_id(page),
+                }
+
+        template = self._SITE_SEARCH_URL_TEMPLATES.get(site_key)
+        if template:
+            from urllib.parse import quote_plus
+            url = template.format(query=quote_plus(query))
+            nav = await self.cmd_navigate({
+                "url": url, "timeout": max(10, budget_ms // 1000)})
+            if isinstance(nav, dict) and nav.get("ok"):
+                nav.setdefault("action", "site_search")
+                nav["method"] = "url_fallback"
+                nav["query"] = query
+                nav["site"] = site_key
+            return nav
+
+        return structured_error(
+            "ELEMENT_NOT_FOUND",
+            f"Селекторы поиска не найдены для сайта «{site_key or page.url}». "
+            "Добавьте секцию site_search в config/player_selectors.json.",
+            diagnostics={"site": site_key, "query": query},
+            suggested_safe_actions=[
+                {"tool": "browser_find_link", "args": {"pattern": "search"}},
+                {"tool": "browser_inspect_page", "args": {}},
+            ],
+        )
 
     async def cmd_dialog_state(
         self,

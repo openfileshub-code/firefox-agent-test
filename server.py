@@ -585,6 +585,39 @@ async def call(command: str, params: Optional[dict] = None, *,
         else:
             command, params = "new_tab", params or {}
 
+    # ТЗ §15.4 (C6): site search через форму сайта. URL-фолбэк для YouTube
+    # выполняется демоном как навигация на выдачу — политический контроль
+    # виртуального инструмента browser_navigate_to_search_url применяется
+    # здесь до исполнения (иначе демон обошёл бы middleware).
+    if command == "site_search":
+        s = SETTINGS_LOADER.get()
+        ctx = CONTEXT_MANAGER.get_active_context()
+        forbidden = s.site_forbidden_tools(getattr(ctx, "site", "") or "")
+        if ("browser_navigate_to_search_url" in forbidden
+                and not s.phrase_matches(
+                    "allow_site_search", check_args.get("override_phrase"))):
+            result = {
+                "ok": False,
+                "error_code": "POLICY_SITE_SEARCH_NOT_REQUESTED",
+                "message": (
+                    "Поиск на сайте (переход на страницу выдачи) не разрешён "
+                    "политикой. Явная просьба пользователя или override_phrase"
+                    " обязательны; иначе используйте browser_find_link / "
+                    "browser_expand_menu на текущей странице."
+                ),
+                "rule_source": "user_settings.sites.forbidden_tools",
+                "suggested_safe_actions": [
+                    {"tool": "browser_find_link",
+                     "args": {"pattern": check_args.get("query", "")}},
+                    {"tool": "browser_get_context", "args": {}},
+                ],
+            }
+            CONTEXT_MANAGER.update_from_result(tool_name, check_args, result)
+            AUDIT.record(tool_name, check_args, decision=result,
+                         result=result,
+                         context=CONTEXT_MANAGER.get_active_context().to_public_dict())
+            return result
+
     result = await connector.send(command, params)
 
     if isinstance(result, dict):
@@ -1015,6 +1048,22 @@ async def browser_search_on_page(
     return await call("search_on_page", {
         "pattern": pattern, "regex": regex
     })
+
+
+@mcp.tool()
+async def browser_site_search(query: str, site: str = "") -> dict:
+    """Поиск на текущем сайте через его собственную форму поиска.
+
+    Селекторы — из config/player_selectors.json (секция сайта), для
+    YouTube есть URL-фолбэк /results?search_query=. Политика: навигация
+    на URL выдачи перехватывается виртуальным инструментом
+    browser_navigate_to_search_url и требует allow_site_search или
+    override_phrase (POLICY_SITE_SEARCH_NOT_REQUESTED).
+    """
+    params = {"query": query}
+    if site:
+        params["site"] = site
+    return await call("site_search", params)
 
 
 @mcp.tool()
