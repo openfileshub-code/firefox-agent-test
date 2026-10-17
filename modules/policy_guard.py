@@ -188,6 +188,52 @@ class PolicyGuard:
         self._newtab_deny_at[key] = now
         return None  # sentinel: обычная ветка deny
 
+    def _site_search_gate(self, tool: str, args: dict, ctx, s):
+        """ТЗ §15 (C7): проверка виртуального browser_navigate_to_search_url
+        ДО анти-цикла inplace-навигации.
+
+        Возвращает PolicyDecision (deny) либо None (проверка не применима /
+        разрешено). Если допустить сначала inplace-rewrite, второй denied
+        new_tab на URL выдачи молча исполнял бы навигацию на search-results
+        в обход allow_site_search — порядок проверок нарушен (audit C7).
+        """
+        if tool not in ("browser_new_tab", "browser_navigate"):
+            return None
+        url = str(args.get("url") or "")
+        if not url or not uv.is_search_results_url(url):
+            return None
+        site_forbidden = set()
+        if ctx is not None:
+            site_forbidden = s.site_forbidden_tools(
+                getattr(ctx, "site", "") or "")
+        virtual_forbidden = (
+            "browser_navigate_to_search_url" in site_forbidden)
+        global_allowed = bool(s.g("allow_site_search"))
+        phrase = args.get("override_phrase")
+        if phrase and s.phrase_matches("allow_site_search", phrase):
+            return None
+        if virtual_forbidden:
+            code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
+            message = (
+                "ОШИБКА: Переход на страницу выдачи сайта запрещён политикой "
+                "(browser_navigate_to_search_url в forbidden_tools). Не "
+                "повторяй вызов; используй browser_find_link или "
+                "browser_expand_menu на текущей странице.")
+        elif not global_allowed:
+            code = "POLICY_SITE_SEARCH_NOT_REQUESTED"
+            message = (
+                "Поиск на сайте (URL выдачи) не разрешён: allow_site_search="
+                "false. Требуется явная фраза пользователя override_phrase. "
+                "Используй browser_find_link на текущей странице.")
+        else:
+            return None
+        q = _query_from(url)
+        return _deny(
+            code, tool, args, message=message,
+            suggestions=[{"tool": "browser_find_link", "args": {"pattern": q}},
+                         {"tool": "browser_search_on_page",
+                          "args": {"pattern": q}}])
+
     # ------------------------------------------------------------------
     @property
     def settings(self):
@@ -311,6 +357,10 @@ class PolicyGuard:
 
     # ------------------------------------------------------------------
     def _check_new_tab(self, tool, args, ctx, s) -> PolicyDecision:
+        # ТЗ §15 (C7): gate site-search навигации ДО анти-цикла inplace.
+        gate = self._site_search_gate(tool, args, ctx, s)
+        if gate is not None:
+            return gate
         phrase = args.get("override_phrase")
         global_allow = bool(s.g("allow_new_tab"))
         if phrase and s.phrase_matches("allow_new_tab", phrase):
